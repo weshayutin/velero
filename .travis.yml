@@ -46,6 +46,10 @@ script:
 
 jobs:
   include:
+  - stage: TEST - make ci
+    script: 
+    - | 
+      make update ci
   - stage: build images
     arch: ppc64le
   - arch: s390x
