@@ -125,6 +125,12 @@ Ensure Velero has scaled down to zero pods running
 ```bash
 kubectl get replicaset.apps -n velero
 ```
+Example output
+```
+NAME                DESIRED   CURRENT   READY   AGE
+minio-796cc55795    1         1         1       4m31s
+velero-58f6678ccf   0         0         0       65s
+```
 
 **Note:**
 When starting the Velero server please ensure you have another console open with your KUBECONFIG set and PATH set with velero.  This will assist in your validation
@@ -195,6 +201,10 @@ Launch Visual Studio Code
 * Overwrite the configuration with the following:
 ```
 {
+    // ${workspaceFolder} - the path of the folder opened in VS Code
+    // if $workspaceFolder = VELERO_DEV this config will work as written
+    // if $workspaceFolder = velero the program path = "${workspaceFolder}/cmd/velero/velero.go"
+    
     // Use IntelliSense to learn about possible attributes.
     // Hover to view descriptions of existing attributes.
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
