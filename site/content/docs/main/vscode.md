@@ -161,7 +161,7 @@ $ velero backup-location get
 ```
 ```
 NAME      PROVIDER   BUCKET/PREFIX   PHASE       LAST VALIDATED                  ACCESS MODE   DEFAULT
-default   aws        velero          Unvailable   2022-12-09 13:25:15 -0700 MST   ReadWrite     true
+default   aws        velero          Unavailable   2022-12-09 13:25:15 -0700 MST   ReadWrite     true
 ```
 
 The minio ip address used is no longer valid from your laptop and must be deleted.
