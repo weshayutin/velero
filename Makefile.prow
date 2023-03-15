@@ -24,9 +24,8 @@ test: hack-docker
 hack-docker: envtest
 
 GOPATH:=$(shell go env GOPATH)
-KUBEBUILDER_ASSETS:=$(shell $(GOPATH)/bin/setup-envtest use -p path)
 #  if KUBEBUILDER_ASSETS contains space, escape it
-KUBEBUILDER_ASSETS:=$(shell echo $(KUBEBUILDER_ASSETS) | sed 's/ /\\ /g')
+KUBEBUILDER_ASSETS=$(shell echo $(shell $(GOPATH)/bin/setup-envtest use -p path) | sed 's/ /\\ /g')
 .PHONY: envtest
 envtest: $(GOPATH)/bin/setup-envtest
 	$(GOPATH)/bin/setup-envtest use -p path
