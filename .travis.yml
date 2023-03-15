@@ -22,3 +22,4 @@ jobs:
   - script: make verify
   - script: make all
   - script: make test
+  - script: make -f Makefile.prow ci
