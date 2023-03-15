@@ -1,4 +1,4 @@
-GOFLAGS="-mod=mod"
+GOFLAGS=-mod=mod
 # emulate as close as possible upstream ci target
 # upstream ci target: verify-modules verify all test
 # we skip verify for now
@@ -16,7 +16,7 @@ all:
 .PHONY: test
 # our test is modified to avoid docker usage
 test: hack-docker
-	@echo Using KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS)
+	@echo Testing with KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS)
 	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) GOFLAGS=$(GOFLAGS) hack/test.sh
 
 .PHONY: hack-docker
@@ -31,4 +31,6 @@ envtest: $(GOPATH)/bin/setup-envtest
 	$(GOPATH)/bin/setup-envtest use -p path
 
 $(GOPATH)/bin/setup-envtest:
-	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	@echo Installing envtest tools
+	GOFLAGS= go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	@echo Installed envtest tools
