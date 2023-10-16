@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.16
+FROM golang:1.19
 
 ARG GOPROXY
 
@@ -34,11 +34,11 @@ RUN wget --quiet https://github.com/kubernetes-sigs/kubebuilder/releases/downloa
     rm kubebuilder_2.3.1_linux_amd64.tar.gz
 
 # get controller-tools
-RUN go get sigs.k8s.io/controller-tools/cmd/controller-gen@v0.3.0
+RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.3.0
 
 # get goimports (the revision is pinned so we don't indiscriminately update, but the particular commit
 # is not important)
-RUN go get golang.org/x/tools/cmd/goimports@11e9d9cc0042e6bd10337d4d2c3e5d9295508e7d
+RUN go install golang.org/x/tools/cmd/goimports@11e9d9cc0042e6bd10337d4d2c3e5d9295508e7d
 
 # get protoc compiler and golang plugin
 WORKDIR /root
@@ -47,7 +47,7 @@ RUN wget --quiet https://github.com/protocolbuffers/protobuf/releases/download/v
     unzip protoc-3.9.1-linux-x86_64.zip && \
     mv bin/protoc /usr/bin/protoc && \
     chmod +x /usr/bin/protoc
-RUN go get github.com/golang/protobuf/protoc-gen-go@v1.0.0
+RUN go install github.com/golang/protobuf/protoc-gen-go@v1.0.0
 
 # get goreleaser
 RUN wget --quiet https://github.com/goreleaser/goreleaser/releases/download/v0.120.8/goreleaser_Linux_x86_64.tar.gz && \
