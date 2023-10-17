@@ -20,12 +20,6 @@ ENV GO111MODULE=on
 # Use a proxy for go modules to reduce the likelihood of various hosts being down and breaking the build
 ENV GOPROXY=${GOPROXY}
 
-# get code-generation tools (for now keep in GOPATH since they're not fully modules-compatible yet)
-RUN mkdir -p /go/src/k8s.io
-WORKDIR /go/src/k8s.io
-RUN git config --global advice.detachedHead false
-RUN git clone -b v0.18.4 https://github.com/kubernetes/code-generator
-
 RUN wget --quiet https://github.com/kubernetes-sigs/kubebuilder/releases/download/v2.3.1/kubebuilder_2.3.1_linux_amd64.tar.gz && \
     tar -zxvf kubebuilder_2.3.1_linux_amd64.tar.gz && \
     mv kubebuilder_2.3.1_linux_amd64 /usr/local/kubebuilder && \
