@@ -336,7 +336,7 @@ func (o *InstallOptions) Run(c *cobra.Command, f client.Factory) error {
 	return nil
 }
 
-//Complete completes options for a command.
+// Complete completes options for a command.
 func (o *InstallOptions) Complete(args []string, f client.Factory) error {
 	o.Namespace = f.Namespace()
 	return nil

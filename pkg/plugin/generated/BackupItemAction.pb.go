@@ -5,6 +5,7 @@
 Package generated is a generated protocol buffer package.
 
 It is generated from these files:
+
 	BackupItemAction.proto
 	DeleteItemAction.proto
 	ObjectStore.proto
@@ -14,6 +15,7 @@ It is generated from these files:
 	VolumeSnapshotter.proto
 
 It has these top-level messages:
+
 	ExecuteRequest
 	ExecuteResponse
 	BackupItemActionAppliesToRequest
