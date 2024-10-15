@@ -22,7 +22,7 @@ GOSRC := $(GOPATH)/src
 # Prow settings for e2e tests
 OADP_E2E_DIR := /tmp/oadp-operator
 OADP_E2E_BRANCH := master
-VELERO_IMAGE := quay.io/konveyor/velero:latest
+VELERO_IMAGE ?= quay.io/konveyor/velero:latest
 
 # upstream ci target: verify-modules verify all test
 # we need to modify verify, test, all to avoid usage of docker CLI
