@@ -20,8 +20,8 @@ GOBIN := $(GOPATH)/bin
 GOSRC := $(GOPATH)/src
 
 # Prow settings for e2e tests
-E2E_TEST_DIR := /tmp/oadp-operator
-E2E_TEST_BRANCH := master
+OADP_E2E_DIR := /tmp/oadp-operator
+OADP_E2E_BRANCH := master
 VELERO_IMAGE := quay.io/konveyor/velero:latest
 
 # upstream ci target: verify-modules verify all test
@@ -96,12 +96,17 @@ $(GOBIN)/setup-envtest:
 .PHONY: clone-oadp-operator
 clone-oadp-operator:
 	@echo "Cloning oadp-operator"
-	rm -rf $(E2E_TEST_DIR)
-	git clone --depth 1 --single-branch --branch $(E2E_TEST_BRANCH) https://github.com/openshift/oadp-operator.git $(E2E_TEST_DIR)
+	rm -rf $(OADP_E2E_DIR)
+	git clone --depth 1 --single-branch --branch $(OADP_E2E_BRANCH) https://github.com/openshift/oadp-operator.git $(OADP_E2E_DIR)
+
+.PHONY: clean-oadp-operator
+clean-oadp-operator:
+	@echo "Cleaning oadp-operator"
+	rm -rf $(OADP_E2E_DIR)
 
 # to run just one test, use `make test-e2e GINKGO_ARGS="--ginkgo.focus='MySQL application CSI'"`
 .PHONY: test-e2e
 test-e2e: clone-oadp-operator
 	@echo "Running oadp-operator e2e tests"
-	pushd $(E2E_TEST_DIR) && export VELERO_IMAGE=$(VELERO_IMAGE) && make test-e2e && popd
+	pushd $(OADP_E2E_DIR) && export VELERO_IMAGE=$(VELERO_IMAGE) && make test-e2e && popd
 
