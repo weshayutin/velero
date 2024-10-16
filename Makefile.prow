@@ -126,7 +126,7 @@ push:
 .PHONY: test-e2e
 test-e2e: clone-oadp-operator
 	@echo "Running oadp-operator e2e tests"
-	pushd $(OADP_E2E_DIR) && export VELERO_IMAGE=$(VELERO_IMAGE) && make test-e2e && popd
+	pushd $(OADP_E2E_DIR) && VELERO_IMAGE=$(VELERO_IMAGE) make test-e2e && popd
 
 # build and test locally
 .PHONY: local-build-test-e2e
