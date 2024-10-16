@@ -101,9 +101,8 @@ $(GOBIN)/setup-envtest:
 	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
 .PHONY: clone-oadp-operator
-clone-oadp-operator:
+clone-oadp-operator: clean-oadp-operator
 	@echo "Cloning oadp-operator"
-	rm -rf $(OADP_E2E_DIR)
 	git clone --depth 1 --single-branch --branch $(OADP_E2E_BRANCH) https://github.com/openshift/oadp-operator.git $(OADP_E2E_DIR)
 
 .PHONY: clean-oadp-operator
