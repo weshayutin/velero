@@ -139,4 +139,4 @@ local-build-test-e2e: build push clone-oadp-operator
 .PHONY: local-test-e2e
 local-test-e2e: clone-oadp-operator
 	@echo "Running oadp-operator e2e tests locally"
-	pushd $(OADP_E2E_DIR) && export VELERO_IMAGE=$(LOCAL_BUILT_IMAGE) && export OPENSHIFT_CI=false && export GINKGO_ARGS=$(GINKGO_ARGS) && make test-e2e && popd
+	pushd $(OADP_E2E_DIR) && VELERO_IMAGE=$(LOCAL_BUILT_IMAGE) OPENSHIFT_CI=false GINKGO_ARGS=$(GINKGO_ARGS) make test-e2e && popd
