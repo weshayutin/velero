@@ -122,6 +122,12 @@ push:
 	@echo "Pushing image: $(LOCAL_BUILT_IMAGE)"
 	docker push $(LOCAL_BUILT_IMAGE)
 
+# deploy oadp-operator, potentially used by prow jobs
+.PHONY: deploy-olm
+deploy-olm: clone-oadp-operator
+	@echo "Deploying oadp-operator"
+	pushd $(OADP_E2E_DIR) && make deploy-olm && popd
+
 # test-e2e is to be used by prow.
 .PHONY: test-e2e
 test-e2e: clone-oadp-operator
