@@ -23,11 +23,12 @@ GOSRC := $(GOPATH)/src
 OADP_E2E_DIR := /tmp/oadp-operator
 OADP_E2E_BRANCH := master
 VELERO_IMAGE ?= quay.io/konveyor/velero:latest
-LOCAL_BUILT_IMAGE=ttl.sh/velero-$(shell git rev-parse --short HEAD):1h
 CLUSTER_ARCH ?= $(shell oc get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}')
 CLUSTER_OS ?= $(shell oc get node -o jsonpath='{.items[0].status.nodeInfo.operatingSystem}')
 DOCKER_BUILD_ARGS = --platform=$(CLUSTER_OS)/$(CLUSTER_ARCH)
 GINKGO_ARGS ?= ""  # by default (empty) run all tests, otherwise specify a test to run
+LOCAL_BUILT_IMAGE=ttl.sh/velero-$(CLUSTER_ARCH)-$(shell git rev-parse --short HEAD):1h
+
 
 
 # upstream ci target: verify-modules verify all test
