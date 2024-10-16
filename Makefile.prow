@@ -138,7 +138,7 @@ test-e2e: clone-oadp-operator
 .PHONY: local-build-test-e2e
 local-build-test-e2e: build push clone-oadp-operator
 	@echo "Building Velero and Running oadp-operator e2e tests locally"
-	pushd $(OADP_E2E_DIR) && export VELERO_IMAGE=$(LOCAL_BUILT_IMAGE) && export OPENSHIFT_CI=false && make test-e2e && popd
+	pushd $(OADP_E2E_DIR) && VELERO_IMAGE=$(LOCAL_BUILT_IMAGE) OPENSHIFT_CI=false make test-e2e && popd
 
 # to run just one test, export GINKGO_ARGS="--ginkgo.focus='MySQL application CSI'"
 # do NOT build, test locally
