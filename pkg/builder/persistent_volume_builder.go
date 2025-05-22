@@ -95,10 +95,22 @@ func (b *PersistentVolumeBuilder) StorageClass(name string) *PersistentVolumeBui
 	return b
 }
 
+// VolumeMode sets the PersistentVolume's volume mode.
+func (b *PersistentVolumeBuilder) VolumeMode(volMode corev1api.PersistentVolumeMode) *PersistentVolumeBuilder {
+	b.object.Spec.VolumeMode = &volMode
+	return b
+}
+
 // NodeAffinityRequired sets the PersistentVolume's NodeAffinity Requirement.
 func (b *PersistentVolumeBuilder) NodeAffinityRequired(req *corev1api.NodeSelector) *PersistentVolumeBuilder {
 	b.object.Spec.NodeAffinity = &corev1api.VolumeNodeAffinity{
 		Required: req,
 	}
+	return b
+}
+
+// Phase sets the PersistentVolume's phase.
+func (b *PersistentVolumeBuilder) Phase(phase corev1api.PersistentVolumePhase) *PersistentVolumeBuilder {
+	b.object.Status.Phase = phase
 	return b
 }

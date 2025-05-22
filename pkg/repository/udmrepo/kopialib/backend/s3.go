@@ -19,6 +19,8 @@ package backend
 import (
 	"context"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/kopia/kopia/repo/blob"
 	"github.com/kopia/kopia/repo/blob/s3"
 
@@ -29,35 +31,28 @@ type S3Backend struct {
 	options s3.Options
 }
 
-func (c *S3Backend) Setup(ctx context.Context, flags map[string]string) error {
+func (c *S3Backend) Setup(ctx context.Context, flags map[string]string, logger logrus.FieldLogger) error {
 	var err error
 	c.options.BucketName, err = mustHaveString(udmrepo.StoreOptionOssBucket, flags)
 	if err != nil {
 		return err
 	}
 
-	c.options.AccessKeyID, err = mustHaveString(udmrepo.StoreOptionS3KeyId, flags)
-	if err != nil {
-		return err
-	}
-
-	c.options.SecretAccessKey, err = mustHaveString(udmrepo.StoreOptionS3SecretKey, flags)
-	if err != nil {
-		return err
-	}
-
+	c.options.AccessKeyID = optionalHaveString(udmrepo.StoreOptionS3KeyID, flags)
+	c.options.SecretAccessKey = optionalHaveString(udmrepo.StoreOptionS3SecretKey, flags)
 	c.options.Endpoint = optionalHaveString(udmrepo.StoreOptionS3Endpoint, flags)
 	c.options.Region = optionalHaveString(udmrepo.StoreOptionOssRegion, flags)
 	c.options.Prefix = optionalHaveString(udmrepo.StoreOptionPrefix, flags)
-	c.options.DoNotUseTLS = optionalHaveBool(ctx, udmrepo.StoreOptionS3DisableTls, flags)
-	c.options.DoNotVerifyTLS = optionalHaveBool(ctx, udmrepo.StoreOptionS3DisableTlsVerify, flags)
+	c.options.DoNotUseTLS = optionalHaveBool(ctx, udmrepo.StoreOptionS3DisableTLS, flags)
+	c.options.DoNotVerifyTLS = optionalHaveBool(ctx, udmrepo.StoreOptionS3DisableTLSVerify, flags)
 	c.options.SessionToken = optionalHaveString(udmrepo.StoreOptionS3Token, flags)
+	c.options.RootCA = optionalHaveBase64(ctx, udmrepo.StoreOptionCACert, flags)
 
 	c.options.Limits = setupLimits(ctx, flags)
 
 	return nil
 }
 
-func (c *S3Backend) Connect(ctx context.Context, isCreate bool) (blob.Storage, error) {
-	return s3.New(ctx, &c.options)
+func (c *S3Backend) Connect(ctx context.Context, isCreate bool, logger logrus.FieldLogger) (blob.Storage, error) {
+	return s3.New(ctx, &c.options, false)
 }

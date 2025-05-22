@@ -63,7 +63,12 @@ func InvokeDeleteActions(ctx *Context) error {
 	if err != nil {
 		return errors.Wrapf(err, "error extracting backup")
 	}
-	defer ctx.Filesystem.RemoveAll(dir)
+	defer func() {
+		if err := ctx.Filesystem.RemoveAll(dir); err != nil {
+			ctx.Log.Errorf("error removing temporary directory %s: %s", dir, err.Error())
+		}
+	}()
+
 	ctx.Log.Debugf("Downloaded and extracted the backup file to: %s", dir)
 
 	backupResources, err := archive.NewParser(ctx.Log, ctx.Filesystem).Parse(dir)
@@ -114,6 +119,7 @@ func InvokeDeleteActions(ctx *Context) error {
 					if !action.Selector.Matches(labels.Set(obj.GetLabels())) {
 						continue
 					}
+
 					err = action.DeleteItemAction.Execute(&velero.DeleteItemActionExecuteInput{
 						Item:   obj,
 						Backup: ctx.Backup,
@@ -121,7 +127,6 @@ func InvokeDeleteActions(ctx *Context) error {
 					// Since we want to keep looping even on errors, log them instead of just returning.
 					if err != nil {
 						itemLog.WithError(err).Error("plugin error")
-
 					}
 				}
 			}

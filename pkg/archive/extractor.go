@@ -1,5 +1,5 @@
 /*
-Copyright 2019 the Velero contributors.
+Copyright the Velero contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -84,7 +84,7 @@ func (e *Extractor) readBackup(tarRdr *tar.Reader) (string, error) {
 			return "", err
 		}
 
-		target := filepath.Join(dir, header.Name) //nolint:gosec
+		target := filepath.Join(dir, header.Name) //nolint:gosec // Internal usage. No need to check.
 
 		switch header.Typeflag {
 		case tar.TypeDir:

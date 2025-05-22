@@ -61,7 +61,7 @@ in progress for 1.9.
 * Add rbac and annotation test cases (#4455, @mqiu)
 * remove --crds-version in velero install command. (#4446, @jxun)
 * Upgrade e2e test vsphere plugin (#4440, @mqiu)
-* Fix e2e test failures for the inappropriate optimaze of velero install (#4438, @mqiu)
+* Fix e2e test failures for the inappropriate optimize of velero install (#4438, @mqiu)
 * Limit backup namespaces on test resource filtering cases (#4437, @mqiu)
 * Bump up Go to 1.17 (#4431, @reasonerjt)
 * Added `<backup name>`-itemsnapshots.json.gz to the backup format.  This file exists
@@ -103,7 +103,7 @@ Also added DownloadTargetKindBackupItemSnapshots for retrieving the signed URL t
 * Fix CVE-2020-29652 and CVE-2020-26160 (#4274, @ywk253100)
 * Refine tag-release.sh to align with change in release process (#4185, @reasonerjt)
 * Fix plugins incompatible issue in upgrade test (#4141, @danfengliu)
-* Verify group before treating resource as cohabitating (#4126, @sseago)
+* Verify group before treating resource as cohabiting (#4126, @sseago)
 * Added ItemSnapshotter plugin definition and plugin framework - addresses #3533.
   Part of the Upload Progress enhancement (#3533) (#4077, @dsmithuchida)
 * Add upgrade test in E2E test (#4058, @danfengliu)

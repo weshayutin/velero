@@ -1,26 +1,14 @@
-
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  creationTimestamp: null
   name: velero-perms
 rules:
 - apiGroups:
   - ""
   resources:
   - persistentvolumerclaims
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
   - persistentvolumes
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
   - pods
   verbs:
   - get
@@ -28,6 +16,18 @@ rules:
   - velero.io
   resources:
   - backuprepositories
+  - backups
+  - backupstoragelocations
+  - datadownloads
+  - datauploads
+  - deletebackuprequests
+  - downloadrequests
+  - podvolumebackups
+  - podvolumerestores
+  - restores
+  - schedules
+  - serverstatusrequests
+  - volumesnapshotlocations
   verbs:
   - create
   - delete
@@ -40,166 +40,18 @@ rules:
   - velero.io
   resources:
   - backuprepositories/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - velero.io
-  resources:
-  - backups
-  verbs:
-  - create
-  - delete
-- apiGroups:
-  - velero.io
-  resources:
-  - backupstoragelocations
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - velero.io
-  resources:
+  - backups/status
   - backupstoragelocations/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - velero.io
-  resources:
-  - deletebackuprequests
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - velero.io
-  resources:
+  - datadownloads/status
+  - datauploads/status
   - deletebackuprequests/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - velero.io
-  resources:
-  - downloadrequests
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - velero.io
-  resources:
   - downloadrequests/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - velero.io
-  resources:
-  - podvolumebackups
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - velero.io
-  resources:
   - podvolumebackups/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - velero.io
-  resources:
-  - podvolumerestores
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - velero.io
-  resources:
   - podvolumerestores/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - velero.io
-  resources:
-  - schedules
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - velero.io
-  resources:
+  - restores/status
   - schedules/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - velero.io
-  resources:
-  - serverstatusrequests
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - velero.io
-  resources:
   - serverstatusrequests/status
   verbs:
   - get
   - patch
   - update
-- apiGroups:
-  - velero.io
-  resources:
-  - volumesnapshotlocations
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch

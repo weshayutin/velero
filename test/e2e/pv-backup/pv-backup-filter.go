@@ -4,15 +4,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
 
-	. "github.com/vmware-tanzu/velero/test/e2e"
+	. "github.com/vmware-tanzu/velero/test"
 	. "github.com/vmware-tanzu/velero/test/e2e/test"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/common"
+	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
 
 type PVBackupFiltering struct {
@@ -31,28 +31,22 @@ var OptInPVBackupTest func() = TestFunc(&PVBackupFiltering{annotation: OPT_IN_AN
 var OptOutPVBackupTest func() = TestFunc(&PVBackupFiltering{annotation: OPT_OUT_ANN, id: "opt-out"})
 
 func (p *PVBackupFiltering) Init() error {
-	p.Ctx, _ = context.WithTimeout(context.Background(), 60*time.Minute)
-	p.Client = TestClientInstance
-	p.NSBaseName = "ns"
-	p.NSIncluded = &[]string{fmt.Sprintf("%s-%s-%d", p.NSBaseName, p.id, 1), fmt.Sprintf("%s-%s-%d", p.NSBaseName, p.id, 2)}
+	p.TestCase.Init()
+	p.CaseBaseName = "pv-filter-" + p.UUIDgen
+	p.BackupName = "backup-" + p.CaseBaseName + p.id
+	p.RestoreName = "restore-" + p.CaseBaseName + p.id
+	p.VeleroCfg.UseVolumeSnapshots = false
+	p.VeleroCfg.UseNodeAgent = true
+	p.NSIncluded = &[]string{fmt.Sprintf("%s-%s-%d", p.CaseBaseName, p.id, 1), fmt.Sprintf("%s-%s-%d", p.CaseBaseName, p.id, 2)}
 
 	p.TestMsg = &TestMSG{
 		Desc:      "Backup PVs filtering by opt-in/opt-out annotation",
 		FailedMSG: "Failed to PVs filtering by opt-in/opt-out annotation",
 		Text:      fmt.Sprintf("Should backup PVs in namespace %s according to annotation %s", *p.NSIncluded, p.annotation),
 	}
-	return nil
-}
 
-func (p *PVBackupFiltering) StartRun() error {
-	err := installStorageClass(context.Background(), fmt.Sprintf("testdata/storage-class/%s.yaml", VeleroCfg.CloudProvider))
-	if err != nil {
-		return err
-	}
-	p.BackupName = p.BackupName + "backup-" + p.id + "-" + UUIDgen.String()
-	p.RestoreName = p.RestoreName + "restore-" + p.id + "-" + UUIDgen.String()
 	p.BackupArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "backup", p.BackupName,
+		"create", "--namespace", p.VeleroCfg.VeleroNamespace, "backup", p.BackupName,
 		"--include-namespaces", strings.Join(*p.NSIncluded, ","),
 		"--snapshot-volumes=false", "--wait",
 	}
@@ -60,16 +54,15 @@ func (p *PVBackupFiltering) StartRun() error {
 	//   annotation will be ignored, so it's only set for opt-out test
 	if p.annotation == OPT_OUT_ANN {
 		p.BackupArgs = append(p.BackupArgs, "--default-volumes-to-fs-backup")
-
 	}
 	p.RestoreArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "restore", p.RestoreName,
+		"create", "--namespace", p.VeleroCfg.VeleroNamespace, "restore", p.RestoreName,
 		"--from-backup", p.BackupName, "--wait",
 	}
 	return nil
 }
+
 func (p *PVBackupFiltering) CreateResources() error {
-	p.Ctx, _ = context.WithTimeout(context.Background(), 60*time.Minute)
 	for _, ns := range *p.NSIncluded {
 		By(fmt.Sprintf("Create namespaces %s for workload\n", ns), func() {
 			Expect(CreateNamespace(p.Ctx, p.Client, ns)).To(Succeed(), fmt.Sprintf("Failed to create namespace %s", ns))
@@ -94,7 +87,8 @@ func (p *PVBackupFiltering) CreateResources() error {
 				podName := fmt.Sprintf("pod-%d", i)
 				pods = append(pods, podName)
 				By(fmt.Sprintf("Create pod %s in namespace %s", podName, ns), func() {
-					pod, err := CreatePodWithPVC(p.Client, ns, podName, "e2e-storage-class", volumes)
+					pod, err := CreatePod(p.Client, ns, podName, StorageClassName, "",
+						volumes, nil, nil, p.VeleroCfg.ImageRegistryProxy)
 					Expect(err).To(Succeed())
 					ann := map[string]string{
 						p.annotation: volumesToAnnotation,
@@ -111,18 +105,26 @@ func (p *PVBackupFiltering) CreateResources() error {
 	By(fmt.Sprintf("Waiting for all pods to start %s\n", p.podsList), func() {
 		for index, ns := range *p.NSIncluded {
 			By(fmt.Sprintf("Waiting for all pods to start %d in namespace %s", index, ns), func() {
-				WaitForPods(p.Ctx, p.Client, ns, p.podsList[index])
+				Expect(WaitForPods(p.Ctx, p.Client, ns, p.podsList[index])).To(Succeed())
 			})
 		}
 	})
-	By(fmt.Sprintf("Polulate all pods %s with file %s", p.podsList, FILE_NAME), func() {
+	By(fmt.Sprintf("Populate all pods %s with file %s", p.podsList, FILE_NAME), func() {
 		for index, ns := range *p.NSIncluded {
 			By(fmt.Sprintf("Creating file in all pods to start %d in namespace %s", index, ns), func() {
-				WaitForPods(p.Ctx, p.Client, ns, p.podsList[index])
+				Expect(WaitForPods(p.Ctx, p.Client, ns, p.podsList[index])).To(Succeed())
 				for i, pod := range p.podsList[index] {
 					for j := range p.volumesList[i] {
-						Expect(CreateFileToPod(p.Ctx, ns, pod, p.volumesList[i][j],
-							FILE_NAME, fileContent(ns, pod, p.volumesList[i][j]))).To(Succeed())
+						Expect(CreateFileToPod(
+							p.Ctx,
+							ns,
+							pod,
+							pod,
+							p.volumesList[i][j],
+							FILE_NAME,
+							CreateFileContent(ns, pod, p.volumesList[i][j]),
+							WorkerOSLinux,
+						)).To(Succeed())
 					}
 				}
 			})
@@ -132,7 +134,6 @@ func (p *PVBackupFiltering) CreateResources() error {
 }
 
 func (p *PVBackupFiltering) Verify() error {
-	p.Ctx, _ = context.WithTimeout(context.Background(), 60*time.Minute)
 	By(fmt.Sprintf("Waiting for all pods to start %s", p.podsList), func() {
 		for index, ns := range *p.NSIncluded {
 			By(fmt.Sprintf("Waiting for all pods to start %d in namespace %s", index, ns), func() {
@@ -149,21 +150,45 @@ func (p *PVBackupFiltering) Verify() error {
 					if j%2 == 0 {
 						if p.annotation == OPT_IN_ANN {
 							By(fmt.Sprintf("File should exists in PV %s of pod %s under namespace %s\n", p.volumesList[i][j], p.podsList[k][i], ns), func() {
-								Expect(fileExist(p.Ctx, ns, p.podsList[k][i], p.volumesList[i][j])).To(Succeed(), "File not exist as expect")
+								Expect(fileExist(
+									p.Ctx,
+									ns,
+									p.podsList[k][i],
+									p.volumesList[i][j],
+									p.VeleroCfg.WorkerOS,
+								)).To(Succeed(), "File not exist as expect")
 							})
 						} else {
 							By(fmt.Sprintf("File should not exist in PV %s of pod %s under namespace %s\n", p.volumesList[i][j], p.podsList[k][i], ns), func() {
-								Expect(fileNotExist(p.Ctx, ns, p.podsList[k][i], p.volumesList[i][j])).To(Succeed(), "File exists, not as expect")
+								Expect(fileNotExist(
+									p.Ctx,
+									ns,
+									p.podsList[k][i],
+									p.volumesList[i][j],
+									p.VeleroCfg.WorkerOS,
+								)).To(Succeed(), "File exists, not as expect")
 							})
 						}
 					} else {
 						if p.annotation == OPT_OUT_ANN {
 							By(fmt.Sprintf("File should exists in PV %s of pod %s under namespace %s\n", p.volumesList[i][j], p.podsList[k][i], ns), func() {
-								Expect(fileExist(p.Ctx, ns, p.podsList[k][i], p.volumesList[i][j])).To(Succeed(), "File not exist as expect")
+								Expect(fileExist(
+									p.Ctx,
+									ns,
+									p.podsList[k][i],
+									p.volumesList[i][j],
+									p.VeleroCfg.WorkerOS,
+								)).To(Succeed(), "File not exist as expect")
 							})
 						} else {
 							By(fmt.Sprintf("File should not exist in PV %s of pod %s under namespace %s\n", p.volumesList[i][j], p.podsList[k][i], ns), func() {
-								Expect(fileNotExist(p.Ctx, ns, p.podsList[k][i], p.volumesList[i][j])).To(Succeed(), "File exists, not as expect")
+								Expect(fileNotExist(
+									p.Ctx,
+									ns,
+									p.podsList[k][i],
+									p.volumesList[i][j],
+									p.VeleroCfg.WorkerOS,
+								)).To(Succeed(), "File exists, not as expect")
 							})
 						}
 					}
@@ -174,18 +199,21 @@ func (p *PVBackupFiltering) Verify() error {
 
 	return nil
 }
-func fileContent(namespace, podName, volume string) string {
-	return fmt.Sprintf("ns-%s pod-%s volume-%s", namespace, podName, volume)
-}
 
-func fileExist(ctx context.Context, namespace, podName, volume string) error {
-	c, err := ReadFileFromPodVolume(ctx, namespace, podName, volume, FILE_NAME)
+func fileExist(
+	ctx context.Context,
+	namespace string,
+	podName string,
+	volume string,
+	workerOS string,
+) error {
+	c, _, err := ReadFileFromPodVolume(ctx, namespace, podName, podName, volume, FILE_NAME, workerOS)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("Fail to read file %s from volume %s of pod %s in %s ",
 			FILE_NAME, volume, podName, namespace))
 	}
 	c = strings.Replace(c, "\n", "", -1)
-	origin_content := strings.Replace(fileContent(namespace, podName, volume), "\n", "", -1)
+	origin_content := strings.Replace(CreateFileContent(namespace, podName, volume), "\n", "", -1)
 	if c == origin_content {
 		return nil
 	} else {
@@ -193,18 +221,18 @@ func fileExist(ctx context.Context, namespace, podName, volume string) error {
 			FILE_NAME, volume, podName, namespace))
 	}
 }
-func fileNotExist(ctx context.Context, namespace, podName, volume string) error {
-	_, err := ReadFileFromPodVolume(ctx, namespace, podName, volume, FILE_NAME)
+func fileNotExist(
+	ctx context.Context,
+	namespace string,
+	podName string,
+	volume string,
+	workerOS string,
+) error {
+	_, _, err := ReadFileFromPodVolume(ctx, namespace, podName, podName, volume, FILE_NAME, workerOS)
 	if err != nil {
 		return nil
 	} else {
 		return errors.New(fmt.Sprintf("UNEXPECTED: File %s exist in volume %s of pod %s in namespace %s.",
 			FILE_NAME, volume, podName, namespace))
 	}
-}
-
-func installStorageClass(ctx context.Context, yaml string) error {
-	fmt.Printf("Install storage class with %s.\n", yaml)
-	err := KubectlApplyByFile(ctx, yaml)
-	return err
 }

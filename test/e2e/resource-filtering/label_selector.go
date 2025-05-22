@@ -17,18 +17,15 @@ limitations under the License.
 package filtering
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/pkg/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	. "github.com/vmware-tanzu/velero/test/e2e"
 	. "github.com/vmware-tanzu/velero/test/e2e/test"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
 
 /*
@@ -44,11 +41,12 @@ var BackupWithLabelSelector func() = TestFunc(&LabelSelector{testInBackup})
 
 func (l *LabelSelector) Init() error {
 	l.FilteringCase.Init()
-	l.BackupName = "backup-label-selector-" + UUIDgen.String()
-	l.RestoreName = "restore-" + UUIDgen.String()
-	l.NSBaseName = "backup-label-selector-" + UUIDgen.String()
+	l.CaseBaseName = "backup-label-selector-" + l.UUIDgen
+	l.BackupName = "backup-" + l.CaseBaseName
+	l.RestoreName = "restore-" + l.CaseBaseName
+
 	for nsNum := 0; nsNum < l.NamespacesTotal; nsNum++ {
-		createNSName := fmt.Sprintf("%s-%00000d", l.NSBaseName, nsNum)
+		createNSName := fmt.Sprintf("%s-%00000d", l.CaseBaseName, nsNum)
 		*l.NSIncluded = append(*l.NSIncluded, createNSName)
 	}
 	l.TestMsg = &TestMSG{
@@ -61,23 +59,22 @@ func (l *LabelSelector) Init() error {
 	}
 	l.labelSelector = "resourcefiltering"
 	l.BackupArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "backup", l.BackupName,
+		"create", "--namespace", l.VeleroCfg.VeleroNamespace, "backup", l.BackupName,
 		"--selector", "resourcefiltering=true",
 		"--include-namespaces", strings.Join(*l.NSIncluded, ","),
 		"--default-volumes-to-fs-backup", "--wait",
 	}
 
 	l.RestoreArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "restore", l.RestoreName,
+		"create", "--namespace", l.VeleroCfg.VeleroNamespace, "restore", l.RestoreName,
 		"--from-backup", l.BackupName, "--wait",
 	}
 	return nil
 }
 
 func (l *LabelSelector) CreateResources() error {
-	l.Ctx, _ = context.WithTimeout(context.Background(), 60*time.Minute)
 	for nsNum := 0; nsNum < l.NamespacesTotal; nsNum++ {
-		namespace := fmt.Sprintf("%s-%00000d", l.NSBaseName, nsNum)
+		namespace := fmt.Sprintf("%s-%00000d", l.CaseBaseName, nsNum)
 		fmt.Printf("Creating resources in namespace ...%s\n", namespace)
 		labels := l.labels
 		if nsNum%2 == 0 {
@@ -88,20 +85,10 @@ func (l *LabelSelector) CreateResources() error {
 		if err := CreateNamespaceWithLabel(l.Ctx, l.Client, namespace, labels); err != nil {
 			return errors.Wrapf(err, "Failed to create namespace %s", namespace)
 		}
-
-		serviceAccountName := "default"
-		// wait until the service account is created before patch the image pull secret
-		if err := WaitUntilServiceAccountCreated(l.Ctx, l.Client, namespace, serviceAccountName, 10*time.Minute); err != nil {
-			return errors.Wrapf(err, "failed to wait the service account %q created under the namespace %q", serviceAccountName, namespace)
-		}
-		// add the image pull secret to avoid the image pull limit issue of Docker Hub
-		if err := PatchServiceAccountWithImagePullSecret(l.Ctx, l.Client, namespace, serviceAccountName, VeleroCfg.RegistryCredentialFile); err != nil {
-			return errors.Wrapf(err, "failed to patch the service account %q under the namespace %q", serviceAccountName, namespace)
-		}
 		//Create deployment
 		fmt.Printf("Creating deployment in namespaces ...%s\n", namespace)
 
-		deployment := NewDeployment(l.NSBaseName, namespace, l.replica, labels)
+		deployment := NewDeployment(l.CaseBaseName, namespace, l.replica, labels, l.VeleroCfg.ImageRegistryProxy).Result()
 		deployment, err := CreateDeployment(l.Client.ClientGo, namespace, deployment)
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to delete the namespace %q", namespace))
@@ -111,7 +98,7 @@ func (l *LabelSelector) CreateResources() error {
 			return errors.Wrap(err, fmt.Sprintf("failed to ensure job completion in namespace: %q", namespace))
 		}
 		//Create Secret
-		secretName := l.NSBaseName
+		secretName := l.CaseBaseName
 		fmt.Printf("Creating secret %s in namespaces ...%s\n", secretName, namespace)
 		_, err = CreateSecret(l.Client.ClientGo, namespace, secretName, l.labels)
 		if err != nil {
@@ -127,10 +114,10 @@ func (l *LabelSelector) CreateResources() error {
 
 func (l *LabelSelector) Verify() error {
 	for nsNum := 0; nsNum < l.NamespacesTotal; nsNum++ {
-		namespace := fmt.Sprintf("%s-%00000d", l.NSBaseName, nsNum)
+		namespace := fmt.Sprintf("%s-%00000d", l.CaseBaseName, nsNum)
 		fmt.Printf("Checking resources in namespaces ...%s\n", namespace)
 		//Check deployment
-		_, err := GetDeployment(l.Client.ClientGo, namespace, l.NSBaseName)
+		_, err := GetDeployment(l.Client.ClientGo, namespace, l.CaseBaseName)
 		if nsNum%2 == 1 { //include
 			if err != nil {
 				return errors.Wrap(err, fmt.Sprintf("failed to list deployment in namespace: %q", namespace))
@@ -147,7 +134,7 @@ func (l *LabelSelector) Verify() error {
 		}
 
 		//Check secrets
-		secretsList, err := l.Client.ClientGo.CoreV1().Secrets(namespace).List(context.TODO(), metav1.ListOptions{
+		secretsList, err := l.Client.ClientGo.CoreV1().Secrets(namespace).List(l.Ctx, metav1.ListOptions{
 			LabelSelector: l.labelSelector,
 		})
 
@@ -155,7 +142,7 @@ func (l *LabelSelector) Verify() error {
 			if err != nil {
 				return errors.Wrap(err, fmt.Sprintf("failed to list secrets in namespace: %q", namespace))
 			} else if len(secretsList.Items) == 0 {
-				return errors.Errorf(fmt.Sprintf("no secrets found in namespace: %q", namespace))
+				return errors.Errorf("no secrets found in namespace: %q", namespace)
 			}
 		} else { //exclude
 			if err == nil {

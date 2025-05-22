@@ -24,7 +24,7 @@ import (
 
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/client"
@@ -49,13 +49,11 @@ func NewLogsCommand(f client.Factory) *cobra.Command {
 		Run: func(c *cobra.Command, args []string) {
 			restoreName := args[0]
 
-			veleroClient, err := f.Client()
-			cmd.CheckError(err)
-
 			kbClient, err := f.KubebuilderClient()
 			cmd.CheckError(err)
 
-			restore, err := veleroClient.VeleroV1().Restores(f.Namespace()).Get(context.TODO(), restoreName, metav1.GetOptions{})
+			restore := new(velerov1api.Restore)
+			err = kbClient.Get(context.TODO(), ctrlclient.ObjectKey{Namespace: f.Namespace(), Name: restoreName}, restore)
 			if apierrors.IsNotFound(err) {
 				cmd.Exit("Restore %q does not exist.", restoreName)
 			} else if err != nil {
@@ -63,8 +61,8 @@ func NewLogsCommand(f client.Factory) *cobra.Command {
 			}
 
 			switch restore.Status.Phase {
-			case velerov1api.RestorePhaseCompleted, velerov1api.RestorePhaseFailed, velerov1api.RestorePhasePartiallyFailed:
-				// terminal phases, don't exit.
+			case velerov1api.RestorePhaseCompleted, velerov1api.RestorePhaseFailed, velerov1api.RestorePhasePartiallyFailed, velerov1api.RestorePhaseWaitingForPluginOperations, velerov1api.RestorePhaseWaitingForPluginOperationsPartiallyFailed:
+				// terminal and waiting for plugin operations phases, don't exit.
 			default:
 				cmd.Exit("Logs for restore %q are not available until it's finished processing. Please wait "+
 					"until the restore has a phase of Completed or Failed and try again.", restoreName)

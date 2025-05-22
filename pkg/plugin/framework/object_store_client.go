@@ -44,7 +44,7 @@ type ObjectStoreGRPCClient struct {
 	grpcClient proto.ObjectStoreClient
 }
 
-func newObjectStoreGRPCClient(base *common.ClientBase, clientConn *grpc.ClientConn) interface{} {
+func newObjectStoreGRPCClient(base *common.ClientBase, clientConn *grpc.ClientConn) any {
 	return &ObjectStoreGRPCClient{
 		ClientBase: base,
 		grpcClient: proto.NewObjectStoreClient(clientConn),
@@ -87,7 +87,9 @@ func (c *ObjectStoreGRPCClient) PutObject(bucket, key string, body io.Reader) er
 			return nil
 		}
 		if err != nil {
-			stream.CloseSend()
+			if err := stream.CloseSend(); err != nil {
+				return common.FromGRPCError(err)
+			}
 			return errors.WithStack(err)
 		}
 

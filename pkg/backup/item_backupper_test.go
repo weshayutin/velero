@@ -19,6 +19,12 @@ package backup
 import (
 	"testing"
 
+	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/vmware-tanzu/velero/pkg/kuberesource"
+
 	"github.com/stretchr/testify/assert"
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -167,6 +173,99 @@ func Test_zoneFromPVNodeAffinity(t *testing.T) {
 			k, v := zoneFromPVNodeAffinity(tt.pv, keys...)
 			assert.Equal(t, tt.wantKey, k)
 			assert.Equal(t, tt.wantValue, v)
+		})
+	}
+}
+
+func TestGetPVName(t *testing.T) {
+	testcases := []struct {
+		name          string
+		obj           metav1.Object
+		groupResource schema.GroupResource
+		pvName        string
+		hasErr        bool
+	}{
+		{
+			name:          "pv should return pv name",
+			obj:           builder.ForPersistentVolume("test-pv").Result(),
+			groupResource: kuberesource.PersistentVolumes,
+			pvName:        "test-pv",
+			hasErr:        false,
+		},
+		{
+			name:          "pvc without volumeName should return error",
+			obj:           builder.ForPersistentVolumeClaim("ns", "pvc-1").Result(),
+			groupResource: kuberesource.PersistentVolumeClaims,
+			pvName:        "",
+			hasErr:        true,
+		},
+		{
+			name:          "pvc with volumeName should return pv name",
+			obj:           builder.ForPersistentVolumeClaim("ns", "pvc-1").VolumeName("test-pv-2").Result(),
+			groupResource: kuberesource.PersistentVolumeClaims,
+			pvName:        "test-pv-2",
+			hasErr:        false,
+		},
+		{
+			name:          "unsupported group resource should return empty pv name",
+			obj:           builder.ForPod("ns", "pod1").Result(),
+			groupResource: kuberesource.Pods,
+			pvName:        "",
+			hasErr:        false,
+		},
+	}
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := &unstructured.Unstructured{Object: nil}
+			if tc.obj != nil {
+				data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(tc.obj)
+				o = &unstructured.Unstructured{Object: data}
+				require.NoError(t, err)
+			}
+			name, err2 := getPVName(o, tc.groupResource)
+			assert.Equal(t, tc.pvName, name)
+			assert.Equal(t, tc.hasErr, err2 != nil)
+		})
+	}
+}
+
+func TestRandom(t *testing.T) {
+	pv := new(corev1api.PersistentVolume)
+	pvc := new(corev1api.PersistentVolumeClaim)
+	obj := builder.ForPod("ns1", "pod1").ServiceAccount("sa").Result()
+	o, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	err1 := runtime.DefaultUnstructuredConverter.FromUnstructured(o, pv)
+	err2 := runtime.DefaultUnstructuredConverter.FromUnstructured(o, pvc)
+	t.Logf("err1: %v, err2: %v", err1, err2)
+}
+
+func TestAddVolumeInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		pv   *corev1api.PersistentVolume
+	}{
+		{
+			name: "PV has ClaimRef",
+			pv:   builder.ForPersistentVolume("testPV").ClaimRef("testNS", "testPVC").Result(),
+		},
+		{
+			name: "PV has no ClaimRef",
+			pv:   builder.ForPersistentVolume("testPV").Result(),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ib := itemBackupper{}
+			ib.backupRequest = new(Request)
+			ib.backupRequest.VolumesInformation.Init()
+
+			pvObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(tc.pv)
+			require.NoError(t, err)
+			logger := logrus.StandardLogger()
+
+			err = ib.addVolumeInfo(&unstructured.Unstructured{Object: pvObj}, logger)
+			require.NoError(t, err)
 		})
 	}
 }

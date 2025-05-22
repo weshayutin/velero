@@ -26,18 +26,23 @@ builds:
       - arm
       - arm64
       - ppc64le
+      - s390x
     ignore:
       # don't build arm for darwin and arm/arm64 for windows
       - goos: darwin
         goarch: arm
       - goos: darwin
         goarch: ppc64le
+      - goos: darwin
+        goarch: s390x
       - goos: windows
         goarch: arm
       - goos: windows
         goarch: arm64
       - goos: windows
         goarch: ppc64le
+      - goos: windows
+        goarch: s390x
     ldflags:
       - -X "github.com/vmware-tanzu/velero/pkg/buildinfo.Version={{ .Tag }}" -X "github.com/vmware-tanzu/velero/pkg/buildinfo.GitSHA={{ .FullCommit }}" -X "github.com/vmware-tanzu/velero/pkg/buildinfo.GitTreeState={{ .Env.GIT_TREE_STATE }}" -X "github.com/vmware-tanzu/velero/pkg/buildinfo.ImageRegistry={{ .Env.REGISTRY }}"
 archives:
@@ -54,3 +59,10 @@ release:
     name: velero
   draft: true
   prerelease: auto
+
+git:
+  # What should be used to sort tags when gathering the current and previous
+  # tags if there are more than one tag in the same commit.
+  #
+  # Default: `-version:refname`
+  tag_sort: -version:creatordate

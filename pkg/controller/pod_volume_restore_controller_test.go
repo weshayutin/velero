@@ -27,7 +27,7 @@ import (
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/clock"
+	clocks "k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -196,7 +196,7 @@ func TestShouldProcess(t *testing.T) {
 			c := &PodVolumeRestoreReconciler{
 				logger: logrus.New(),
 				Client: cli,
-				clock:  &clock.RealClock{},
+				clock:  &clocks.RealClock{},
 			}
 
 			shouldProcess, _, _ := c.shouldProcess(ctx, c.logger, ts.obj)
@@ -491,8 +491,8 @@ func TestFindVolumeRestoresForPod(t *testing.T) {
 		Client: clientBuilder.Build(),
 		logger: logrus.New(),
 	}
-	requests := reconciler.findVolumeRestoresForPod(pod)
-	assert.Len(t, requests, 0)
+	requests := reconciler.findVolumeRestoresForPod(context.Background(), pod)
+	assert.Empty(t, requests)
 
 	// contain one matching PVR
 	reconciler.Client = clientBuilder.WithLists(&velerov1api.PodVolumeRestoreList{
@@ -515,6 +515,6 @@ func TestFindVolumeRestoresForPod(t *testing.T) {
 			},
 		},
 	}).Build()
-	requests = reconciler.findVolumeRestoresForPod(pod)
+	requests = reconciler.findVolumeRestoresForPod(context.Background(), pod)
 	assert.Len(t, requests, 1)
 }

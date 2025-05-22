@@ -84,12 +84,6 @@ spec:
           volumeMounts:
           - mountPath: /target
             name: plugins
-        - image: velero/velero-plugin-for-csi
-          imagePullPolicy: Always
-          name: velero-plugin-for-csi
-          volumeMounts:
-          - mountPath: /target
-            name: plugins
       restartPolicy: Always
       serviceAccountName: velero
       volumes:
@@ -101,7 +95,7 @@ spec:
           secret:
             secretName: cloud-credentials
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:

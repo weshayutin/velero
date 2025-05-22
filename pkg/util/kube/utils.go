@@ -19,6 +19,7 @@ package kube
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -35,6 +36,9 @@ import (
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/label"
+	"github.com/vmware-tanzu/velero/pkg/uploader"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 )
 
@@ -47,7 +51,10 @@ const (
 	KubeAnnBoundByController      = "pv.kubernetes.io/bound-by-controller"
 	KubeAnnDynamicallyProvisioned = "pv.kubernetes.io/provisioned-by"
 	KubeAnnMigratedTo             = "pv.kubernetes.io/migrated-to"
+	KubeAnnSelectedNode           = "volume.kubernetes.io/selected-node"
 )
+
+var ErrorPodVolumeIsNotPVC = errors.New("pod volume is not a PVC")
 
 // NamespaceAndName returns a string in the format <namespace>/<name>
 func NamespaceAndName(objMeta metav1.Object) string {
@@ -58,18 +65,26 @@ func NamespaceAndName(objMeta metav1.Object) string {
 }
 
 // EnsureNamespaceExistsAndIsReady attempts to create the provided Kubernetes namespace.
-// It returns three values: a bool indicating whether or not the namespace is ready,
-// a bool indicating whether or not the namespace was created and an error if the creation failed
-// for a reason other than that the namespace already exists. Note that in the case where the
-// namespace already exists and is not ready, this function will return (false, false, nil).
-// If the namespace exists and is marked for deletion, this function will wait up to the timeout for it to fully delete.
-func EnsureNamespaceExistsAndIsReady(namespace *corev1api.Namespace, client corev1client.NamespaceInterface, timeout time.Duration) (bool, bool, error) {
+// It returns three values:
+//   - a bool indicating whether or not the namespace is ready,
+//   - a bool indicating whether or not the namespace was created
+//   - an error if one occurred.
+//
+// examples:
+//
+//	namespace already exists and is not ready, this function will return (false, false, nil).
+//	If the namespace exists and is marked for deletion, this function will wait up to the timeout for it to fully delete.
+func EnsureNamespaceExistsAndIsReady(namespace *corev1api.Namespace, client corev1client.NamespaceInterface, timeout time.Duration, resourceDeletionStatusTracker ResourceDeletionStatusTracker) (ready bool, nsCreated bool, err error) {
 	// nsCreated tells whether the namespace was created by this method
 	// required for keeping track of number of restored items
-	var nsCreated bool
-	var ready bool
-	err := wait.PollImmediate(time.Second, timeout, func() (bool, error) {
-		clusterNS, err := client.Get(context.TODO(), namespace.Name, metav1.GetOptions{})
+	// if namespace is marked for deletion, and we timed out, report an error
+	var terminatingNamespace bool
+
+	var namespaceAlreadyInDeletionTracker bool
+
+	err = wait.PollUntilContextTimeout(context.Background(), time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		clusterNS, err := client.Get(ctx, namespace.Name, metav1.GetOptions{})
+		// if namespace is marked for deletion, and we timed out, report an error
 
 		if apierrors.IsNotFound(err) {
 			// Namespace isn't in cluster, we're good to create.
@@ -80,9 +95,14 @@ func EnsureNamespaceExistsAndIsReady(namespace *corev1api.Namespace, client core
 			// Return the err and exit the loop.
 			return true, err
 		}
-
 		if clusterNS != nil && (clusterNS.GetDeletionTimestamp() != nil || clusterNS.Status.Phase == corev1api.NamespaceTerminating) {
+			if resourceDeletionStatusTracker.Contains(clusterNS.Kind, clusterNS.Name, clusterNS.Name) {
+				namespaceAlreadyInDeletionTracker = true
+				return true, errors.Errorf("namespace %s is already present in the polling set, skipping execution", namespace.Name)
+			}
+
 			// Marked for deletion, keep waiting
+			terminatingNamespace = true
 			return false, nil
 		}
 
@@ -93,6 +113,14 @@ func EnsureNamespaceExistsAndIsReady(namespace *corev1api.Namespace, client core
 
 	// err will be set if we timed out or encountered issues retrieving the namespace,
 	if err != nil {
+		if terminatingNamespace {
+			// If the namespace is marked for deletion, and we timed out, adding it in tracker
+			resourceDeletionStatusTracker.Add(namespace.Kind, namespace.Name, namespace.Name)
+			return false, nsCreated, errors.Wrapf(err, "timed out waiting for terminating namespace %s to disappear before restoring", namespace.Name)
+		} else if namespaceAlreadyInDeletionTracker {
+			// If the namespace is already in the tracker, return an error.
+			return false, nsCreated, errors.Wrapf(err, "skipping polling for terminating namespace %s", namespace.Name)
+		}
 		return false, nsCreated, errors.Wrapf(err, "error getting namespace %s", namespace.Name)
 	}
 
@@ -121,6 +149,57 @@ func EnsureNamespaceExistsAndIsReady(namespace *corev1api.Namespace, client core
 // where the specified volume lives.
 // For volumes with a CSIVolumeSource, append "/mount" to the directory name.
 func GetVolumeDirectory(ctx context.Context, log logrus.FieldLogger, pod *corev1api.Pod, volumeName string, cli client.Client) (string, error) {
+	pvc, pv, volume, err := GetPodPVCVolume(ctx, log, pod, volumeName, cli)
+	if err != nil {
+		// This case implies the administrator created the PV and attached it directly, without PVC.
+		// Note that only one VolumeSource can be populated per Volume on a pod
+		if err == ErrorPodVolumeIsNotPVC {
+			if volume.VolumeSource.CSI != nil {
+				return volume.Name + "/mount", nil
+			}
+			return volume.Name, nil
+		}
+		return "", errors.WithStack(err)
+	}
+
+	// Most common case is that we have a PVC VolumeSource, and we need to check the PV it points to for a CSI source.
+	// PV's been created with a CSI source.
+	isProvisionedByCSI, err := isProvisionedByCSI(log, pv, cli)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	if isProvisionedByCSI {
+		if pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == corev1api.PersistentVolumeBlock {
+			return pvc.Spec.VolumeName, nil
+		}
+		return pvc.Spec.VolumeName + "/mount", nil
+	}
+
+	return pvc.Spec.VolumeName, nil
+}
+
+// GetVolumeMode gets the uploader.PersistentVolumeMode of the volume.
+func GetVolumeMode(ctx context.Context, log logrus.FieldLogger, pod *corev1api.Pod, volumeName string, cli client.Client) (
+	uploader.PersistentVolumeMode, error) {
+	_, pv, _, err := GetPodPVCVolume(ctx, log, pod, volumeName, cli)
+
+	if err != nil {
+		if err == ErrorPodVolumeIsNotPVC {
+			return uploader.PersistentVolumeFilesystem, nil
+		}
+		return "", errors.WithStack(err)
+	}
+
+	if pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == corev1api.PersistentVolumeBlock {
+		return uploader.PersistentVolumeBlock, nil
+	}
+	return uploader.PersistentVolumeFilesystem, nil
+}
+
+// GetPodPVCVolume gets the PVC, PV and volume for a pod volume name.
+// Returns pod volume in case of ErrorPodVolumeIsNotPVC error
+func GetPodPVCVolume(ctx context.Context, log logrus.FieldLogger, pod *corev1api.Pod, volumeName string, cli client.Client) (
+	*corev1api.PersistentVolumeClaim, *corev1api.PersistentVolume, *corev1api.Volume, error) {
 	var volume *corev1api.Volume
 
 	for i := range pod.Spec.Volumes {
@@ -131,41 +210,26 @@ func GetVolumeDirectory(ctx context.Context, log logrus.FieldLogger, pod *corev1
 	}
 
 	if volume == nil {
-		return "", errors.New("volume not found in pod")
+		return nil, nil, nil, errors.New("volume not found in pod")
 	}
 
-	// This case implies the administrator created the PV and attached it directly, without PVC.
-	// Note that only one VolumeSource can be populated per Volume on a pod
 	if volume.VolumeSource.PersistentVolumeClaim == nil {
-		if volume.VolumeSource.CSI != nil {
-			return volume.Name + "/mount", nil
-		}
-		return volume.Name, nil
+		return nil, nil, volume, ErrorPodVolumeIsNotPVC // There is a pod volume but it is not a PVC
 	}
 
-	// Most common case is that we have a PVC VolumeSource, and we need to check the PV it points to for a CSI source.
 	pvc := &corev1api.PersistentVolumeClaim{}
 	err := cli.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: volume.VolumeSource.PersistentVolumeClaim.ClaimName}, pvc)
 	if err != nil {
-		return "", errors.WithStack(err)
+		return nil, nil, nil, errors.WithStack(err)
 	}
 
 	pv := &corev1api.PersistentVolume{}
 	err = cli.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv)
 	if err != nil {
-		return "", errors.WithStack(err)
+		return nil, nil, nil, errors.WithStack(err)
 	}
 
-	// PV's been created with a CSI source.
-	isProvisionedByCSI, err := isProvisionedByCSI(log, pv, cli)
-	if err != nil {
-		return "", errors.WithStack(err)
-	}
-	if isProvisionedByCSI {
-		return pvc.Spec.VolumeName + "/mount", nil
-	}
-
-	return pvc.Spec.VolumeName, nil
+	return pvc, pv, volume, nil
 }
 
 // isProvisionedByCSI function checks whether this is a CSI PV by annotation.
@@ -196,8 +260,8 @@ func isProvisionedByCSI(log logrus.FieldLogger, pv *corev1api.PersistentVolume, 
 	return false, nil
 }
 
-// SinglePathMatch function will be called by PVB and PVR controller to check whether pass-in volume path is valid.
-// Check whether there is only one match by the path's pattern (/host_pods/%s/volumes/*/volume_name/[mount|]).
+// SinglePathMatch checks whether pass-in volume path is valid.
+// Check whether there is only one match by the path's pattern.
 func SinglePathMatch(path string, fs filesystem.Interface, log logrus.FieldLogger) (string, error) {
 	matches, err := fs.Glob(path)
 	if err != nil {
@@ -262,4 +326,31 @@ func IsCRDReady(crd *unstructured.Unstructured) (bool, error) {
 	default:
 		return false, fmt.Errorf("unable to handle CRD with version %s", ver)
 	}
+}
+
+// AddAnnotations adds the supplied key-values to the annotations on the object
+func AddAnnotations(o *metav1.ObjectMeta, vals map[string]string) {
+	if o.Annotations == nil {
+		o.Annotations = make(map[string]string)
+	}
+	for k, v := range vals {
+		o.Annotations[k] = v
+	}
+}
+
+// AddLabels adds the supplied key-values to the labels on the object
+func AddLabels(o *metav1.ObjectMeta, vals map[string]string) {
+	if o.Labels == nil {
+		o.Labels = make(map[string]string)
+	}
+	for k, v := range vals {
+		o.Labels[k] = label.GetValidName(v)
+	}
+}
+
+func HasBackupLabel(o *metav1.ObjectMeta, backupName string) bool {
+	if o.Labels == nil || len(strings.TrimSpace(backupName)) == 0 {
+		return false
+	}
+	return o.Labels[velerov1api.BackupNameLabel] == label.GetValidName(backupName)
 }

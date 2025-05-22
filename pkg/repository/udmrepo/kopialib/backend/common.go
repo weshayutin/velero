@@ -25,16 +25,15 @@ import (
 	"github.com/kopia/kopia/repo/blob/throttling"
 	"github.com/kopia/kopia/repo/content"
 	"github.com/kopia/kopia/repo/encryption"
+	"github.com/kopia/kopia/repo/format"
 	"github.com/kopia/kopia/repo/hashing"
-	"github.com/kopia/kopia/repo/object"
 	"github.com/kopia/kopia/repo/splitter"
 
 	"github.com/vmware-tanzu/velero/pkg/repository/udmrepo"
 )
 
 const (
-	maxDataCacheMB         = 2000
-	maxMetadataCacheMB     = 2000
+	defaultCacheLimitMB    = 5000
 	maxCacheDurationSecond = 30
 )
 
@@ -51,12 +50,12 @@ func setupLimits(ctx context.Context, flags map[string]string) throttling.Limits
 // SetupNewRepositoryOptions setups the options when creating a new Kopia repository
 func SetupNewRepositoryOptions(ctx context.Context, flags map[string]string) repo.NewRepositoryOptions {
 	return repo.NewRepositoryOptions{
-		BlockFormat: content.FormattingOptions{
+		BlockFormat: format.ContentFormat{
 			Hash:       optionalHaveStringWithDefault(udmrepo.StoreOptionGenHashAlgo, flags, hashing.DefaultAlgorithm),
 			Encryption: optionalHaveStringWithDefault(udmrepo.StoreOptionGenEncryptAlgo, flags, encryption.DefaultAlgorithm),
 		},
 
-		ObjectFormat: object.Format{
+		ObjectFormat: format.ObjectFormat{
 			Splitter: optionalHaveStringWithDefault(udmrepo.StoreOptionGenSplitAlgo, flags, splitter.DefaultAlgorithm),
 		},
 
@@ -67,11 +66,21 @@ func SetupNewRepositoryOptions(ctx context.Context, flags map[string]string) rep
 
 // SetupConnectOptions setups the options when connecting to an existing Kopia repository
 func SetupConnectOptions(ctx context.Context, repoOptions udmrepo.RepoOptions) repo.ConnectOptions {
+	cacheLimit := optionalHaveIntWithDefault(ctx, udmrepo.StoreOptionCacheLimit, repoOptions.StorageOptions, defaultCacheLimitMB) << 20
+
+	// 80% for data cache and 20% for metadata cache and align to KB
+	dataCacheLimit := (cacheLimit / 5 * 4) >> 10
+	metadataCacheLimit := (cacheLimit / 5) >> 10
+
 	return repo.ConnectOptions{
 		CachingOptions: content.CachingOptions{
-			MaxCacheSizeBytes:         maxDataCacheMB << 20,
-			MaxMetadataCacheSizeBytes: maxMetadataCacheMB << 20,
-			MaxListCacheDuration:      content.DurationSeconds(time.Duration(maxCacheDurationSecond) * time.Second),
+			// softLimit 80%
+			ContentCacheSizeBytes:  (dataCacheLimit / 5 * 4) << 10,
+			MetadataCacheSizeBytes: (metadataCacheLimit / 5 * 4) << 10,
+			// hardLimit 100%
+			ContentCacheSizeLimitBytes:  dataCacheLimit << 10,
+			MetadataCacheSizeLimitBytes: metadataCacheLimit << 10,
+			MaxListCacheDuration:        content.DurationSeconds(time.Duration(maxCacheDurationSecond) * time.Second),
 		},
 		ClientOptions: repo.ClientOptions{
 			Hostname:    optionalHaveString(udmrepo.GenOptionOwnerDomain, repoOptions.GeneralOptions),

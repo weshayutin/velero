@@ -24,13 +24,14 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/vmware-tanzu/velero/internal/storage"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -47,7 +48,6 @@ const (
 type backupStorageLocationReconciler struct {
 	ctx                       context.Context
 	client                    client.Client
-	scheme                    *runtime.Scheme
 	defaultBackupLocationInfo storage.DefaultBackupLocationInfo
 	// use variables to refer to these functions so they can be
 	// replaced with fakes for testing.
@@ -61,7 +61,6 @@ type backupStorageLocationReconciler struct {
 func NewBackupStorageLocationReconciler(
 	ctx context.Context,
 	client client.Client,
-	scheme *runtime.Scheme,
 	defaultBackupLocationInfo storage.DefaultBackupLocationInfo,
 	newPluginManager func(logrus.FieldLogger) clientmgmt.Manager,
 	backupStoreGetter persistence.ObjectBackupStoreGetter,
@@ -69,7 +68,6 @@ func NewBackupStorageLocationReconciler(
 	return &backupStorageLocationReconciler{
 		ctx:                       ctx,
 		client:                    client,
-		scheme:                    scheme,
 		defaultBackupLocationInfo: defaultBackupLocationInfo,
 		newPluginManager:          newPluginManager,
 		backupStoreGetter:         backupStoreGetter,
@@ -79,11 +77,12 @@ func NewBackupStorageLocationReconciler(
 
 // +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations/status,verbs=get;update;patch
+
 func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var unavailableErrors []string
 	var location velerov1api.BackupStorageLocation
 
-	log := r.log.WithField("controller", BackupStorageLocation).WithField(BackupStorageLocation, req.NamespacedName.String())
+	log := r.log.WithField("controller", constant.ControllerBackupStorageLocation).WithField(constant.ControllerBackupStorageLocation, req.NamespacedName.String())
 	log.Debug("Validating availability of BackupStorageLocation")
 
 	locationList, err := storage.ListBackupStorageLocations(r.ctx, r.client, req.Namespace)
@@ -95,11 +94,8 @@ func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctr
 	pluginManager := r.newPluginManager(log)
 	defer pluginManager.CleanupClients()
 
-	var defaultFound bool
+	// find the BSL that matches the request
 	for _, bsl := range locationList.Items {
-		if bsl.Spec.Default {
-			defaultFound = true
-		}
 		if bsl.Name == req.Name && bsl.Namespace == req.Namespace {
 			location = bsl
 		}
@@ -110,15 +106,11 @@ func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	isDefault := location.Spec.Default
-
-	// TODO(2.0) remove this check since the server default will be deprecated
-	if !defaultFound && location.Name == r.defaultBackupLocationInfo.StorageLocation {
-		// For backward-compatible, to configure the backup storage location as the default if
-		// none of the BSLs be marked as the default and the BSL name matches against the
-		// "velero server --default-backup-storage-location".
-		isDefault = true
-		defaultFound = true
+	// decide the default BSL
+	defaultFound, err := r.ensureSingleDefaultBSL(locationList)
+	if err != nil {
+		log.WithError(err).Error("failed to ensure single default bsl")
+		return ctrl.Result{}, nil
 	}
 
 	func() {
@@ -154,9 +146,6 @@ func (r *backupStorageLocationReconciler) Reconcile(ctx context.Context, req ctr
 			log.WithError(err).Error("fail to validate backup store")
 			return
 		}
-
-		// updates the default backup location
-		location.Spec.Default = isDefault
 	}()
 
 	r.logReconciledPhase(defaultFound, locationList, unavailableErrors)
@@ -168,7 +157,7 @@ func (r *backupStorageLocationReconciler) logReconciledPhase(defaultFound bool, 
 	var availableBSLs []*velerov1api.BackupStorageLocation
 	var unAvailableBSLs []*velerov1api.BackupStorageLocation
 	var unknownBSLs []*velerov1api.BackupStorageLocation
-	log := r.log.WithField("controller", BackupStorageLocation)
+	log := r.log.WithField("controller", constant.ControllerBackupStorageLocation)
 
 	for i, location := range locationList.Items {
 		phase := location.Status.Phase
@@ -202,20 +191,74 @@ func (r *backupStorageLocationReconciler) logReconciledPhase(defaultFound bool, 
 }
 
 func (r *backupStorageLocationReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	gp := kube.NewGenericEventPredicate(func(object client.Object) bool {
+		location := object.(*velerov1api.BackupStorageLocation)
+		return storage.IsReadyToValidate(location.Spec.ValidationFrequency, location.Status.LastValidationTime, r.defaultBackupLocationInfo.ServerValidationFrequency, r.log.WithField("controller", constant.ControllerBackupStorageLocation))
+	})
 	g := kube.NewPeriodicalEnqueueSource(
-		r.log,
+		r.log.WithField("controller", constant.ControllerBackupStorageLocation),
 		mgr.GetClient(),
 		&velerov1api.BackupStorageLocationList{},
 		bslValidationEnqueuePeriod,
-		kube.PeriodicalEnqueueSourceOption{},
+		kube.PeriodicalEnqueueSourceOption{
+			Predicates: []predicate.Predicate{gp},
+		},
 	)
-	gp := kube.NewGenericEventPredicate(func(object client.Object) bool {
-		location := object.(*velerov1api.BackupStorageLocation)
-		return storage.IsReadyToValidate(location.Spec.ValidationFrequency, location.Status.LastValidationTime, r.defaultBackupLocationInfo.ServerValidationFrequency, r.log.WithField("controller", BackupStorageLocation))
-	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		// As the "status.LastValidationTime" field is always updated, this triggers new reconciling process, skip the update event that include no spec change to avoid the reconcile loop
 		For(&velerov1api.BackupStorageLocation{}, builder.WithPredicates(kube.SpecChangePredicate{})).
-		Watches(g, nil, builder.WithPredicates(gp)).
+		WatchesRawSource(g).
+		Named(constant.ControllerBackupStorageLocation).
 		Complete(r)
+}
+
+// ensureSingleDefaultBSL ensures that there is only one default BSL in the namespace.
+// the default BSL priority is as follows:
+// 1. follow the user's setting (the most recent validation BSL is the default BSL)
+// 2. follow the server's setting ("velero server --default-backup-storage-location")
+func (r *backupStorageLocationReconciler) ensureSingleDefaultBSL(locationList velerov1api.BackupStorageLocationList) (bool, error) {
+	// get all default BSLs
+	var defaultBSLs []*velerov1api.BackupStorageLocation
+	var defaultFound bool
+	for i, location := range locationList.Items {
+		if location.Spec.Default {
+			defaultBSLs = append(defaultBSLs, &locationList.Items[i])
+		}
+	}
+
+	if len(defaultBSLs) > 1 { // more than 1 default BSL
+		// find the most recent updated default BSL
+		var mostRecentCreatedBSL *velerov1api.BackupStorageLocation
+		defaultFound = true
+		for _, bsl := range defaultBSLs {
+			if mostRecentCreatedBSL == nil {
+				mostRecentCreatedBSL = bsl
+				continue
+			}
+			// For lack of a better way to compare timestamps, we use the CreationTimestamp
+			// it cloud not really find the most recent updated BSL, but it is good enough for now
+			bslTimestamp := bsl.CreationTimestamp
+			mostRecentTimestamp := mostRecentCreatedBSL.CreationTimestamp
+			if mostRecentTimestamp.Before(&bslTimestamp) {
+				mostRecentCreatedBSL = bsl
+			}
+		}
+
+		// unset all other default BSLs
+		for _, bsl := range defaultBSLs {
+			if bsl.Name != mostRecentCreatedBSL.Name {
+				bsl.Spec.Default = false
+				if err := r.client.Update(r.ctx, bsl); err != nil {
+					return defaultFound, errors.Wrapf(err, "failed to unset default backup storage location %q", bsl.Name)
+				}
+				r.log.Debugf("update default backup storage location %q to false", bsl.Name)
+			}
+		}
+	} else if len(defaultBSLs) == 0 { // no default BSL
+		defaultFound = false
+	} else { // only 1 default BSL
+		defaultFound = true
+	}
+	return defaultFound, nil
 }

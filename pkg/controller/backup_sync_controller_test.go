@@ -21,18 +21,19 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/sirupsen/logrus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
-	core "k8s.io/client-go/testing"
-
+	testclocks "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlClient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -143,7 +144,7 @@ func defaultLocationWithLongerLocationName(namespace string) *velerov1api.Backup
 	}
 }
 
-func numBackups(c ctrlClient.WithWatch, ns string) (int, error) {
+func numBackups(c ctrlClient.WithWatch) (int, error) {
 	var existingK8SBackups velerov1api.BackupList
 	err := c.List(context.TODO(), &existingK8SBackups, &ctrlClient.ListOptions{})
 	if err != nil {
@@ -155,9 +156,11 @@ func numBackups(c ctrlClient.WithWatch, ns string) (int, error) {
 
 var _ = Describe("Backup Sync Reconciler", func() {
 	It("Test Backup Sync Reconciler basic function", func() {
+		fakeClock := testclocks.NewFakeClock(time.Now())
 		type cloudBackupData struct {
-			backup           *velerov1api.Backup
-			podVolumeBackups []*velerov1api.PodVolumeBackup
+			backup               *velerov1api.Backup
+			podVolumeBackups     []*velerov1api.PodVolumeBackup
+			backupShouldSkipSync bool // backups waiting for plugin operations should not sync
 		}
 
 		tests := []struct {
@@ -184,6 +187,98 @@ var _ = Describe("Backup Sync Reconciler", func() {
 					},
 					{
 						backup: builder.ForBackup("ns-1", "backup-2").Result(),
+					},
+				},
+			},
+			{
+				name:      "backups waiting for plugin operations aren't synced",
+				namespace: "ns-1",
+				location:  defaultLocation("ns-1"),
+				cloudBackups: []*cloudBackupData{
+					{
+						backup: builder.ForBackup("ns-1", "backup-1").
+							Phase(velerov1api.BackupPhaseWaitingForPluginOperations).Result(),
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-2").
+							Phase(velerov1api.BackupPhaseWaitingForPluginOperationsPartiallyFailed).Result(),
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-3").
+							Phase(velerov1api.BackupPhaseWaitingForPluginOperations).Result(),
+						podVolumeBackups: []*velerov1api.PodVolumeBackup{
+							builder.ForPodVolumeBackup("ns-1", "pvb-1").Result(),
+						},
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-4").
+							Phase(velerov1api.BackupPhaseFinalizing).Result(),
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-5").
+							Phase(velerov1api.BackupPhaseFinalizingPartiallyFailed).Result(),
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-6").
+							Phase(velerov1api.BackupPhaseFinalizing).Result(),
+						podVolumeBackups: []*velerov1api.PodVolumeBackup{
+							builder.ForPodVolumeBackup("ns-1", "pvb-2").Result(),
+						},
+						backupShouldSkipSync: true,
+					},
+				},
+			},
+			{
+				name:      "expired backups waiting for plugin operations are synced",
+				namespace: "ns-1",
+				location:  defaultLocation("ns-1"),
+				cloudBackups: []*cloudBackupData{
+					{
+						backup: builder.ForBackup("ns-1", "backup-1").
+							Phase(velerov1api.BackupPhaseWaitingForPluginOperations).
+							Expiration(fakeClock.Now().Add(-time.Hour)).Result(),
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-2").
+							Phase(velerov1api.BackupPhaseWaitingForPluginOperationsPartiallyFailed).
+							Expiration(fakeClock.Now().Add(-time.Hour)).Result(),
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-3").
+							Phase(velerov1api.BackupPhaseWaitingForPluginOperations).
+							Expiration(fakeClock.Now().Add(-time.Hour)).Result(),
+						podVolumeBackups: []*velerov1api.PodVolumeBackup{
+							builder.ForPodVolumeBackup("ns-1", "pvb-1").Result(),
+						},
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-4").
+							Phase(velerov1api.BackupPhaseFinalizing).
+							Expiration(fakeClock.Now().Add(-time.Hour)).Result(),
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-5").
+							Phase(velerov1api.BackupPhaseFinalizingPartiallyFailed).
+							Expiration(fakeClock.Now().Add(-time.Hour)).Result(),
+						backupShouldSkipSync: true,
+					},
+					{
+						backup: builder.ForBackup("ns-1", "backup-6").
+							Phase(velerov1api.BackupPhaseFinalizing).
+							Expiration(fakeClock.Now().Add(-time.Hour)).Result(),
+						podVolumeBackups: []*velerov1api.PodVolumeBackup{
+							builder.ForPodVolumeBackup("ns-1", "pvb-2").Result(),
+						},
+						backupShouldSkipSync: true,
 					},
 				},
 			},
@@ -334,6 +429,9 @@ var _ = Describe("Backup Sync Reconciler", func() {
 					backupNames = append(backupNames, backup.backup.Name)
 					backupStore.On("GetBackupMetadata", backup.backup.Name).Return(backup.backup, nil)
 					backupStore.On("GetPodVolumeBackups", backup.backup.Name).Return(backup.podVolumeBackups, nil)
+					backupStore.On("BackupExists", "bucket-1", backup.backup.Name).Return(true, nil)
+					backupStore.On("GetCSIVolumeSnapshotClasses", backup.backup.Name).Return([]*snapshotv1api.VolumeSnapshotClass{}, nil)
+					backupStore.On("GetCSIVolumeSnapshotContents", backup.backup.Name).Return([]*snapshotv1api.VolumeSnapshotContent{}, nil)
 				}
 				backupStore.On("ListBackups").Return(backupNames, nil)
 			}
@@ -353,7 +451,7 @@ var _ = Describe("Backup Sync Reconciler", func() {
 			})
 
 			Expect(actualResult).To(BeEquivalentTo(ctrl.Result{}))
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			// process the cloud backups
 			for _, cloudBackupData := range test.cloudBackups {
@@ -364,36 +462,42 @@ var _ = Describe("Backup Sync Reconciler", func() {
 						Namespace: cloudBackupData.backup.Namespace,
 						Name:      cloudBackupData.backup.Name},
 					obj)
-				Expect(err).To(BeNil())
-
-				// did this cloud backup already exist in the cluster?
-				var existing *velerov1api.Backup
-				for _, obj := range test.existingBackups {
-					if obj.Name == cloudBackupData.backup.Name {
-						existing = obj
-						break
-					}
-				}
-
-				if existing != nil {
-					// if this cloud backup already exists in the cluster, make sure that what we get from the
-					// client is the existing backup, not the cloud one.
-
-					// verify that the in-cluster backup has its storage location populated, if it's not already.
-					expected := existing.DeepCopy()
-					expected.Spec.StorageLocation = test.location.Name
-
-					Expect(expected).To(BeEquivalentTo(obj))
+				if cloudBackupData.backupShouldSkipSync &&
+					(cloudBackupData.backup.Status.Expiration == nil ||
+						cloudBackupData.backup.Status.Expiration.After(fakeClock.Now())) {
+					Expect(apierrors.IsNotFound(err)).To(BeTrue())
 				} else {
-					// verify that the storage location field and label are set properly
-					Expect(test.location.Name).To(BeEquivalentTo(obj.Spec.StorageLocation))
+					Expect(err).ToNot(HaveOccurred())
 
-					locationName := test.location.Name
-					if test.longLocationNameEnabled {
-						locationName = label.GetValidName(locationName)
+					// did this cloud backup already exist in the cluster?
+					var existing *velerov1api.Backup
+					for _, obj := range test.existingBackups {
+						if obj.Name == cloudBackupData.backup.Name {
+							existing = obj
+							break
+						}
 					}
-					Expect(locationName).To(BeEquivalentTo(obj.Labels[velerov1api.StorageLocationLabel]))
-					Expect(len(obj.Labels[velerov1api.StorageLocationLabel]) <= validation.DNS1035LabelMaxLength).To(BeTrue())
+
+					if existing != nil {
+						// if this cloud backup already exists in the cluster, make sure that what we get from the
+						// client is the existing backup, not the cloud one.
+
+						// verify that the in-cluster backup has its storage location populated, if it's not already.
+						expected := existing.DeepCopy()
+						expected.Spec.StorageLocation = test.location.Name
+
+						Expect(expected).To(BeEquivalentTo(obj))
+					} else {
+						// verify that the storage location field and label are set properly
+						Expect(test.location.Name).To(BeEquivalentTo(obj.Spec.StorageLocation))
+
+						locationName := test.location.Name
+						if test.longLocationNameEnabled {
+							locationName = label.GetValidName(locationName)
+						}
+						Expect(locationName).To(BeEquivalentTo(obj.Labels[velerov1api.StorageLocationLabel]))
+						Expect(len(obj.Labels[velerov1api.StorageLocationLabel])).To(BeNumerically("<=", validation.DNS1035LabelMaxLength))
+					}
 				}
 
 				// process the cloud pod volume backups for this backup, if any
@@ -406,22 +510,28 @@ var _ = Describe("Backup Sync Reconciler", func() {
 							Name:      podVolumeBackup.Name,
 						},
 						objPodVolumeBackup)
-					Expect(err).ShouldNot(HaveOccurred())
+					if cloudBackupData.backupShouldSkipSync &&
+						(cloudBackupData.backup.Status.Expiration == nil ||
+							cloudBackupData.backup.Status.Expiration.After(fakeClock.Now())) {
+						Expect(apierrors.IsNotFound(err)).To(BeTrue())
+					} else {
+						Expect(err).ShouldNot(HaveOccurred())
 
-					// did this cloud pod volume backup already exist in the cluster?
-					var existingPodVolumeBackup *velerov1api.PodVolumeBackup
-					for _, objPodVolumeBackup := range test.existingPodVolumeBackups {
-						if objPodVolumeBackup.Name == podVolumeBackup.Name {
-							existingPodVolumeBackup = objPodVolumeBackup
-							break
+						// did this cloud pod volume backup already exist in the cluster?
+						var existingPodVolumeBackup *velerov1api.PodVolumeBackup
+						for _, objPodVolumeBackup := range test.existingPodVolumeBackups {
+							if objPodVolumeBackup.Name == podVolumeBackup.Name {
+								existingPodVolumeBackup = objPodVolumeBackup
+								break
+							}
 						}
-					}
 
-					if existingPodVolumeBackup != nil {
-						// if this cloud pod volume backup already exists in the cluster, make sure that what we get from the
-						// client is the existing backup, not the cloud one.
-						expected := existingPodVolumeBackup.DeepCopy()
-						Expect(expected).To(BeEquivalentTo(objPodVolumeBackup))
+						if existingPodVolumeBackup != nil {
+							// if this cloud pod volume backup already exists in the cluster, make sure that what we get from the
+							// client is the existing backup, not the cloud one.
+							expected := existingPodVolumeBackup.DeepCopy()
+							Expect(expected).To(BeEquivalentTo(objPodVolumeBackup))
+						}
 					}
 				}
 			}
@@ -437,89 +547,92 @@ var _ = Describe("Backup Sync Reconciler", func() {
 
 		tests := []struct {
 			name            string
-			cloudBackups    sets.String
+			cloudBackups    sets.Set[string]
 			k8sBackups      []*velerov1api.Backup
 			namespace       string
-			expectedDeletes sets.String
+			expectedDeletes sets.Set[string]
 			useLongBSLName  bool
 		}{
 			{
 				name:         "no overlapping backups",
 				namespace:    "ns-1",
-				cloudBackups: sets.NewString("backup-1", "backup-2", "backup-3"),
+				cloudBackups: sets.New[string]("backup-1", "backup-2", "backup-3"),
 				k8sBackups: []*velerov1api.Backup{
 					baseBuilder("backupA").Phase(velerov1api.BackupPhaseCompleted).Result(),
 					baseBuilder("backupB").Phase(velerov1api.BackupPhaseCompleted).Result(),
-					baseBuilder("backupC").Phase(velerov1api.BackupPhaseCompleted).Result(),
+					baseBuilder("backupC").Phase(velerov1api.BackupPhasePartiallyFailed).Result(),
 				},
-				expectedDeletes: sets.NewString("backupA", "backupB", "backupC"),
+				expectedDeletes: sets.New[string]("backupA", "backupB", "backupC"),
 			},
 			{
 				name:         "some overlapping backups",
 				namespace:    "ns-1",
-				cloudBackups: sets.NewString("backup-1", "backup-2", "backup-3"),
+				cloudBackups: sets.New[string]("backup-1", "backup-2", "backup-3"),
 				k8sBackups: []*velerov1api.Backup{
 					baseBuilder("backup-1").Phase(velerov1api.BackupPhaseCompleted).Result(),
 					baseBuilder("backup-2").Phase(velerov1api.BackupPhaseCompleted).Result(),
-					baseBuilder("backup-C").Phase(velerov1api.BackupPhaseCompleted).Result(),
+					baseBuilder("backup-B").Phase(velerov1api.BackupPhaseCompleted).Result(),
+					baseBuilder("backup-C").Phase(velerov1api.BackupPhasePartiallyFailed).Result(),
 				},
-				expectedDeletes: sets.NewString("backup-C"),
+				expectedDeletes: sets.New[string]("backup-B", "backup-C"),
 			},
 			{
 				name:         "all overlapping backups",
 				namespace:    "ns-1",
-				cloudBackups: sets.NewString("backup-1", "backup-2", "backup-3"),
+				cloudBackups: sets.New[string]("backup-1", "backup-2", "backup-3"),
 				k8sBackups: []*velerov1api.Backup{
 					baseBuilder("backup-1").Phase(velerov1api.BackupPhaseCompleted).Result(),
 					baseBuilder("backup-2").Phase(velerov1api.BackupPhaseCompleted).Result(),
-					baseBuilder("backup-3").Phase(velerov1api.BackupPhaseCompleted).Result(),
+					baseBuilder("backup-3").Phase(velerov1api.BackupPhasePartiallyFailed).Result(),
 				},
-				expectedDeletes: sets.NewString(),
+				expectedDeletes: sets.New[string](),
 			},
 			{
 				name:         "no overlapping backups but including backups that are not complete",
 				namespace:    "ns-1",
-				cloudBackups: sets.NewString("backup-1", "backup-2", "backup-3"),
+				cloudBackups: sets.New[string]("backup-1", "backup-2", "backup-3"),
 				k8sBackups: []*velerov1api.Backup{
 					baseBuilder("backupA").Phase(velerov1api.BackupPhaseCompleted).Result(),
+					baseBuilder("backupB").Phase(velerov1api.BackupPhasePartiallyFailed).Result(),
 					baseBuilder("Deleting").Phase(velerov1api.BackupPhaseDeleting).Result(),
 					baseBuilder("Failed").Phase(velerov1api.BackupPhaseFailed).Result(),
 					baseBuilder("FailedValidation").Phase(velerov1api.BackupPhaseFailedValidation).Result(),
 					baseBuilder("InProgress").Phase(velerov1api.BackupPhaseInProgress).Result(),
 					baseBuilder("New").Phase(velerov1api.BackupPhaseNew).Result(),
 				},
-				expectedDeletes: sets.NewString("backupA"),
+				expectedDeletes: sets.New[string]("backupA", "backupB"),
 			},
 			{
 				name:         "all overlapping backups and all backups that are not complete",
 				namespace:    "ns-1",
-				cloudBackups: sets.NewString("backup-1", "backup-2", "backup-3"),
+				cloudBackups: sets.New[string]("backup-1", "backup-2", "backup-3"),
 				k8sBackups: []*velerov1api.Backup{
 					baseBuilder("backup-1").Phase(velerov1api.BackupPhaseFailed).Result(),
 					baseBuilder("backup-2").Phase(velerov1api.BackupPhaseFailedValidation).Result(),
 					baseBuilder("backup-3").Phase(velerov1api.BackupPhaseInProgress).Result(),
 				},
-				expectedDeletes: sets.NewString(),
+				expectedDeletes: sets.New[string](),
 			},
 			{
 				name:         "no completed backups in other locations are deleted",
 				namespace:    "ns-1",
-				cloudBackups: sets.NewString("backup-1", "backup-2", "backup-3"),
+				cloudBackups: sets.New[string]("backup-1", "backup-2", "backup-3"),
 				k8sBackups: []*velerov1api.Backup{
 					baseBuilder("backup-1").Phase(velerov1api.BackupPhaseCompleted).Result(),
 					baseBuilder("backup-2").Phase(velerov1api.BackupPhaseCompleted).Result(),
 					baseBuilder("backup-C").Phase(velerov1api.BackupPhaseCompleted).Result(),
+					baseBuilder("backup-D").Phase(velerov1api.BackupPhasePartiallyFailed).Result(),
 
 					baseBuilder("backup-4").ObjectMeta(builder.WithLabels(velerov1api.StorageLocationLabel, "alternate")).Phase(velerov1api.BackupPhaseCompleted).Result(),
 					baseBuilder("backup-5").ObjectMeta(builder.WithLabels(velerov1api.StorageLocationLabel, "alternate")).Phase(velerov1api.BackupPhaseCompleted).Result(),
-					baseBuilder("backup-6").ObjectMeta(builder.WithLabels(velerov1api.StorageLocationLabel, "alternate")).Phase(velerov1api.BackupPhaseCompleted).Result(),
+					baseBuilder("backup-6").ObjectMeta(builder.WithLabels(velerov1api.StorageLocationLabel, "alternate")).Phase(velerov1api.BackupPhasePartiallyFailed).Result(),
 				},
-				expectedDeletes: sets.NewString("backup-C"),
+				expectedDeletes: sets.New[string]("backup-C", "backup-D"),
 			},
 			{
 				name:         "some overlapping backups",
 				namespace:    "ns-1",
-				cloudBackups: sets.NewString("backup-1", "backup-2", "backup-3"),
+				cloudBackups: sets.New[string]("backup-1", "backup-2", "backup-3"),
 				k8sBackups: []*velerov1api.Backup{
 					builder.ForBackup("ns-1", "backup-1").
 						ObjectMeta(
@@ -539,8 +652,14 @@ var _ = Describe("Backup Sync Reconciler", func() {
 						).
 						Phase(velerov1api.BackupPhaseCompleted).
 						Result(),
+					builder.ForBackup("ns-1", "backup-D").
+						ObjectMeta(
+							builder.WithLabels(velerov1api.StorageLocationLabel, "the-really-long-location-name-that-is-much-more-than-63-c69e779"),
+						).
+						Phase(velerov1api.BackupPhasePartiallyFailed).
+						Result(),
 				},
-				expectedDeletes: sets.NewString("backup-C"),
+				expectedDeletes: sets.New[string]("backup-C", "backup-D"),
 				useLongBSLName:  true,
 			},
 		}
@@ -561,22 +680,10 @@ var _ = Describe("Backup Sync Reconciler", func() {
 				logger:                  velerotest.NewLogger(),
 			}
 
-			expectedDeleteActions := make([]core.Action, 0)
-
 			for _, backup := range test.k8sBackups {
 				// add test backup to client
 				err := client.Create(context.TODO(), backup, &ctrlClient.CreateOptions{})
 				Expect(err).ShouldNot(HaveOccurred())
-
-				// if we expect this backup to be deleted, set up the expected DeleteAction
-				if test.expectedDeletes.Has(backup.Name) {
-					actionDelete := core.NewDeleteAction(
-						velerov1api.SchemeGroupVersion.WithResource("backups"),
-						test.namespace,
-						backup.Name,
-					)
-					expectedDeleteActions = append(expectedDeleteActions, actionDelete)
-				}
 			}
 
 			bslName := "default"
@@ -585,7 +692,7 @@ var _ = Describe("Backup Sync Reconciler", func() {
 			}
 			r.deleteOrphanedBackups(ctx, bslName, test.cloudBackups, velerotest.NewLogger())
 
-			numBackups, err := numBackups(client, r.namespace)
+			numBackups, err := numBackups(client)
 			Expect(err).ShouldNot(HaveOccurred())
 
 			fmt.Println("")
@@ -619,5 +726,174 @@ var _ = Describe("Backup Sync Reconciler", func() {
 		testObjList = backupSyncSourceOrderFunc(locationList)
 		Expect(testObjList).To(BeEquivalentTo(locationList))
 
+	})
+
+	When("testing validateOwnerReferences", func() {
+
+		testCases := []struct {
+			name               string
+			backup             *velerov1api.Backup
+			toCreate           []ctrlClient.Object
+			expectedReferences []metav1.OwnerReference
+		}{
+			{
+				name: "handles empty owner references",
+				backup: &velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						OwnerReferences: []metav1.OwnerReference{},
+					},
+				},
+				expectedReferences: []metav1.OwnerReference{},
+			},
+			{
+				name: "handles missing schedule",
+				backup: &velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								Kind: "Schedule",
+								Name: "some name",
+							},
+						},
+					},
+				},
+				expectedReferences: []metav1.OwnerReference{},
+			},
+			{
+				name: "handles existing reference",
+				backup: &velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								Kind: "Schedule",
+								Name: "existing-schedule",
+							},
+						},
+						Namespace: "test-namespace",
+					},
+				},
+				toCreate: []ctrlClient.Object{
+					&velerov1api.Schedule{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "existing-schedule",
+							Namespace: "test-namespace",
+						},
+					},
+				},
+				expectedReferences: []metav1.OwnerReference{
+					{
+						Kind: "Schedule",
+						Name: "existing-schedule",
+					},
+				},
+			},
+			{
+				name: "handles existing mismatched UID",
+				backup: &velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								Kind: "Schedule",
+								Name: "existing-schedule",
+								UID:  "backup-UID",
+							},
+						},
+						Namespace: "test-namespace",
+					},
+				},
+				toCreate: []ctrlClient.Object{
+					&velerov1api.Schedule{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "existing-schedule",
+							Namespace: "test-namespace",
+							UID:       "schedule-UID",
+						},
+					},
+				},
+				expectedReferences: []metav1.OwnerReference{},
+			},
+			{
+				name: "handles multiple references",
+				backup: &velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								Kind: "Schedule",
+								Name: "existing-schedule",
+								UID:  "1",
+							},
+							{
+								Kind: "Schedule",
+								Name: "missing-schedule",
+								UID:  "2",
+							},
+							{
+								Kind: "Schedule",
+								Name: "mismatched-uid-schedule",
+								UID:  "3",
+							},
+							{
+								Kind: "Schedule",
+								Name: "another-existing-schedule",
+								UID:  "4",
+							},
+						},
+						Namespace: "test-namespace",
+					},
+				},
+				toCreate: []ctrlClient.Object{
+					&velerov1api.Schedule{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "existing-schedule",
+							Namespace: "test-namespace",
+							UID:       "1",
+						},
+					},
+					&velerov1api.Schedule{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "mismatched-uid-schedule",
+							Namespace: "test-namespace",
+							UID:       "not-3",
+						},
+					},
+					&velerov1api.Schedule{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "another-existing-schedule",
+							Namespace: "test-namespace",
+							UID:       "4",
+						},
+					},
+				},
+				expectedReferences: []metav1.OwnerReference{
+					{
+						Kind: "Schedule",
+						Name: "existing-schedule",
+						UID:  "1",
+					},
+					{
+						Kind: "Schedule",
+						Name: "another-existing-schedule",
+						UID:  "4",
+					},
+				},
+			},
+		}
+		for _, test := range testCases {
+			It(test.name, func() {
+				logger := velerotest.NewLogger()
+				b := backupSyncReconciler{
+					client: ctrlfake.NewClientBuilder().Build(),
+				}
+
+				//create all required schedules as needed.
+				for _, creatable := range test.toCreate {
+					err := b.client.Create(context.Background(), creatable)
+					Expect(err).ShouldNot(HaveOccurred())
+				}
+
+				references := b.filterBackupOwnerReferences(context.Background(), test.backup, logger)
+				Expect(references).To(BeEquivalentTo(test.expectedReferences))
+			})
+		}
 	})
 })

@@ -18,6 +18,7 @@ package discovery
 
 import (
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -33,6 +34,8 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/features"
 	kcmdutil "github.com/vmware-tanzu/velero/third_party/kubernetes/pkg/kubectl/cmd/util"
 )
+
+//go:generate mockery --name Helper
 
 // Helper exposes functions for interacting with the Kubernetes discovery
 // API.
@@ -71,7 +74,7 @@ type serverResourcesInterface interface {
 }
 
 type helper struct {
-	discoveryClient discovery.DiscoveryInterface
+	discoveryClient discovery.AggregatedDiscoveryInterface
 	logger          logrus.FieldLogger
 
 	// lock guards mapper, resources and resourcesMap
@@ -86,7 +89,7 @@ type helper struct {
 
 var _ Helper = &helper{}
 
-func NewHelper(discoveryClient discovery.DiscoveryInterface, logger logrus.FieldLogger) (Helper, error) {
+func NewHelper(discoveryClient discovery.AggregatedDiscoveryInterface, logger logrus.FieldLogger) (Helper, error) {
 	h := &helper{
 		discoveryClient: discoveryClient,
 		logger:          logger,
@@ -168,7 +171,7 @@ func (h *helper) Refresh() error {
 	}
 
 	h.resources = discovery.FilteredBy(
-		discovery.ResourcePredicateFunc(filterByVerbs),
+		And(filterByVerbs, skipSubresource),
 		serverResources,
 	)
 
@@ -191,6 +194,8 @@ func (h *helper) Refresh() error {
 		for _, resource := range resourceGroup.APIResources {
 			gvr := gv.WithResource(resource.Name)
 			gvk := gv.WithKind(resource.Kind)
+			resource.Group = gv.Group
+			resource.Version = gv.Version
 			h.resourcesMap[gvr] = resource
 			h.kindMap[gvk] = resource
 		}
@@ -238,8 +243,32 @@ func refreshServerGroupsAndResources(discoveryClient serverResourcesInterface, l
 	return serverGroups, serverResources, err
 }
 
+// And returns a composite predicate that implements a logical AND of the predicates passed to it.
+func And(predicates ...discovery.ResourcePredicateFunc) discovery.ResourcePredicate {
+	return and{predicates}
+}
+
+type and struct {
+	predicates []discovery.ResourcePredicateFunc
+}
+
+func (a and) Match(groupVersion string, r *metav1.APIResource) bool {
+	for _, p := range a.predicates {
+		if !p(groupVersion, r) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func filterByVerbs(groupVersion string, r *metav1.APIResource) bool {
 	return discovery.SupportsAllVerbs{Verbs: []string{"list", "create", "get", "delete"}}.Match(groupVersion, r)
+}
+
+func skipSubresource(_ string, r *metav1.APIResource) bool {
+	// if we have a slash, then this is a subresource and we shouldn't include it.
+	return !strings.Contains(r.Name, "/")
 }
 
 // sortResources sources resources by moving extensions to the end of the slice. The order of all

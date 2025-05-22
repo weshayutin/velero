@@ -37,14 +37,14 @@ func NewDeleteItemActionPlugin(options ...common.PluginOption) *DeleteItemAction
 	}
 }
 
-// DeleteItemActionGRPCClient implements the backup/ItemAction interface and uses a
+// DeleteItemActionGRPCClient implements the DeleteItemAction interface and uses a
 // gRPC client to make calls to the plugin server.
 type DeleteItemActionGRPCClient struct {
 	*common.ClientBase
 	grpcClient proto.DeleteItemActionClient
 }
 
-func newDeleteItemActionGRPCClient(base *common.ClientBase, clientConn *grpc.ClientConn) interface{} {
+func newDeleteItemActionGRPCClient(base *common.ClientBase, clientConn *grpc.ClientConn) any {
 	return &DeleteItemActionGRPCClient{
 		ClientBase: base,
 		grpcClient: proto.NewDeleteItemActionClient(clientConn),

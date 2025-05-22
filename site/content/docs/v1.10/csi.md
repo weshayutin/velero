@@ -24,7 +24,7 @@ Both of these can be added with the `velero install` command.
 ```bash
 velero install \
 --features=EnableCSI \
---plugins=<object storage plugin>,velero/velero-plugin-for-csi:v0.3.0 \
+--plugins=<object storage plugin>,velero/velero-plugin-for-csi:v0.4.0 \
 ...
 ```
 
@@ -41,7 +41,7 @@ This section documents some of the choices made during implementation of the Vel
     ```yaml
       velero.io/csi-volumesnapshot-class: "true"
     ```
- 1. The VolumeSnapshot objects will be removed from the cluster after the backup is uploaded to the object storage, so that the namespace that is backed up can be deleted without removing the snapshot in the storage provider if the `DeletionPolicy` is `Delete.  
+ 1. The VolumeSnapshot objects will be removed from the cluster after the backup is uploaded to the object storage, so that the namespace that is backed up can be deleted without removing the snapshot in the storage provider if the `DeletionPolicy` is `Delete`.  
 
 ## How it Works - Overview
 

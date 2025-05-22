@@ -17,7 +17,6 @@ limitations under the License.
 package framework
 
 import (
-	"fmt"
 	"os"
 	"strings"
 
@@ -25,10 +24,11 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 
+	"github.com/vmware-tanzu/velero/pkg/cmd/server/config"
 	biav2 "github.com/vmware-tanzu/velero/pkg/plugin/framework/backupitemaction/v2"
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework/common"
+	ibav1 "github.com/vmware-tanzu/velero/pkg/plugin/framework/itemblockaction/v1"
 	riav2 "github.com/vmware-tanzu/velero/pkg/plugin/framework/restoreitemaction/v2"
-	"github.com/vmware-tanzu/velero/pkg/util/logging"
 )
 
 // Server serves registered plugin implementations.
@@ -40,6 +40,9 @@ type Server interface {
 	//
 	// This method must be called prior to calling .Serve().
 	BindFlags(flags *pflag.FlagSet) Server
+
+	// GetConfig return the config parsed from the flags
+	GetConfig() *config.Config
 
 	// RegisterBackupItemAction registers a backup item action. Accepted format
 	// for the plugin name is <DNS subdomain>/<non-empty name>.
@@ -90,10 +93,12 @@ type Server interface {
 	// RegisterDeleteItemActions registers multiple Delete item actions.
 	RegisterDeleteItemActions(map[string]common.HandlerInitializer) Server
 
-	RegisterItemSnapshotter(pluginName string, initializer common.HandlerInitializer) Server
+	// RegisterItemBlockAction registers a ItemBlock action. Accepted format
+	// for the plugin name is <DNS subdomain>/<non-empty name>.
+	RegisterItemBlockAction(pluginName string, initializer common.HandlerInitializer) Server
 
-	// RegisterItemSnapshotters registers multiple Item Snapshotters
-	RegisterItemSnapshotters(map[string]common.HandlerInitializer) Server
+	// RegisterItemBlockActions registers multiple ItemBlock actions.
+	RegisterItemBlockActions(map[string]common.HandlerInitializer) Server
 
 	// Server runs the plugin server.
 	Serve()
@@ -101,8 +106,8 @@ type Server interface {
 
 // server implements Server.
 type server struct {
+	config              *config.Config
 	log                 *logrus.Logger
-	logLevelFlag        *logging.LevelFlag
 	flagSet             *pflag.FlagSet
 	backupItemAction    *BackupItemActionPlugin
 	backupItemActionV2  *biav2.BackupItemActionPlugin
@@ -111,7 +116,7 @@ type server struct {
 	restoreItemAction   *RestoreItemActionPlugin
 	restoreItemActionV2 *riav2.RestoreItemActionPlugin
 	deleteItemAction    *DeleteItemActionPlugin
-	itemSnapshotter     *ItemSnapshotterPlugin
+	itemBlockAction     *ibav1.ItemBlockActionPlugin
 }
 
 // NewServer returns a new Server
@@ -119,8 +124,8 @@ func NewServer() Server {
 	log := newLogger()
 
 	return &server{
+		config:              config.GetDefaultConfig(),
 		log:                 log,
-		logLevelFlag:        logging.LogLevelFlag(log.Level),
 		backupItemAction:    NewBackupItemActionPlugin(common.ServerLogger(log)),
 		backupItemActionV2:  biav2.NewBackupItemActionPlugin(common.ServerLogger(log)),
 		volumeSnapshotter:   NewVolumeSnapshotterPlugin(common.ServerLogger(log)),
@@ -128,16 +133,19 @@ func NewServer() Server {
 		restoreItemAction:   NewRestoreItemActionPlugin(common.ServerLogger(log)),
 		restoreItemActionV2: riav2.NewRestoreItemActionPlugin(common.ServerLogger(log)),
 		deleteItemAction:    NewDeleteItemActionPlugin(common.ServerLogger(log)),
-		itemSnapshotter:     NewItemSnapshotterPlugin(common.ServerLogger(log)),
+		itemBlockAction:     ibav1.NewItemBlockActionPlugin(common.ServerLogger(log)),
 	}
 }
 
 func (s *server) BindFlags(flags *pflag.FlagSet) Server {
-	flags.Var(s.logLevelFlag, "log-level", fmt.Sprintf("The level at which to log. Valid values are %s.", strings.Join(s.logLevelFlag.AllowedValues(), ", ")))
 	s.flagSet = flags
-	s.flagSet.ParseErrorsWhitelist.UnknownFlags = true
-
+	s.config.BindFlags(flags)
+	s.flagSet.ParseErrorsWhitelist.UnknownFlags = true // Velero.io word list : ignore
 	return s
+}
+
+func (s *server) GetConfig() *config.Config {
+	return s.config
 }
 
 func (s *server) RegisterBackupItemAction(name string, initializer common.HandlerInitializer) Server {
@@ -224,13 +232,14 @@ func (s *server) RegisterDeleteItemActions(m map[string]common.HandlerInitialize
 	return s
 }
 
-func (s *server) RegisterItemSnapshotter(name string, initializer common.HandlerInitializer) Server {
-	s.itemSnapshotter.Register(name, initializer)
+func (s *server) RegisterItemBlockAction(name string, initializer common.HandlerInitializer) Server {
+	s.itemBlockAction.Register(name, initializer)
 	return s
 }
-func (s *server) RegisterItemSnapshotters(m map[string]common.HandlerInitializer) Server {
+
+func (s *server) RegisterItemBlockActions(m map[string]common.HandlerInitializer) Server {
 	for name := range m {
-		s.RegisterItemSnapshotter(name, m[name])
+		s.RegisterItemBlockAction(name, m[name])
 	}
 	return s
 }
@@ -250,10 +259,13 @@ func getNames(command string, kind common.PluginKind, plugin Interface) []Plugin
 func (s *server) Serve() {
 	if s.flagSet != nil && !s.flagSet.Parsed() {
 		s.log.Debugf("Parsing flags")
-		s.flagSet.Parse(os.Args[1:])
+		if err := s.flagSet.Parse(os.Args[1:]); err != nil {
+			s.log.Errorf("fail to parse the flags: %s", err.Error())
+			return
+		}
 	}
 
-	s.log.Level = s.logLevelFlag.Parse()
+	s.log.Level = s.config.LogLevel.Parse()
 	s.log.Debugf("Setting log level to %s", strings.ToUpper(s.log.Level.String()))
 
 	command := os.Args[0]
@@ -266,7 +278,7 @@ func (s *server) Serve() {
 	pluginIdentifiers = append(pluginIdentifiers, getNames(command, common.PluginKindRestoreItemAction, s.restoreItemAction)...)
 	pluginIdentifiers = append(pluginIdentifiers, getNames(command, common.PluginKindRestoreItemActionV2, s.restoreItemActionV2)...)
 	pluginIdentifiers = append(pluginIdentifiers, getNames(command, common.PluginKindDeleteItemAction, s.deleteItemAction)...)
-	pluginIdentifiers = append(pluginIdentifiers, getNames(command, common.PluginKindItemSnapshotter, s.itemSnapshotter)...)
+	pluginIdentifiers = append(pluginIdentifiers, getNames(command, common.PluginKindItemBlockAction, s.itemBlockAction)...)
 
 	pluginLister := NewPluginLister(pluginIdentifiers...)
 
@@ -281,7 +293,7 @@ func (s *server) Serve() {
 			string(common.PluginKindRestoreItemAction):   s.restoreItemAction,
 			string(common.PluginKindRestoreItemActionV2): s.restoreItemActionV2,
 			string(common.PluginKindDeleteItemAction):    s.deleteItemAction,
-			string(common.PluginKindItemSnapshotter):     s.itemSnapshotter,
+			string(common.PluginKindItemBlockAction):     s.itemBlockAction,
 		},
 		GRPCServer: plugin.DefaultGRPCServer,
 	})

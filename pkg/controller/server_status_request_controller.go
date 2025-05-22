@@ -24,7 +24,7 @@ import (
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/clock"
+	clocks "k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -32,6 +32,7 @@ import (
 	"github.com/vmware-tanzu/velero/internal/velero"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/buildinfo"
+	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework"
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework/common"
 )
@@ -51,17 +52,17 @@ type serverStatusRequestReconciler struct {
 	client         client.Client
 	ctx            context.Context
 	pluginRegistry PluginLister
-	clock          clock.Clock
+	clock          clocks.WithTickerAndDelayedExecution
 
 	log logrus.FieldLogger
 }
 
 // NewServerStatusRequestReconciler initializes and returns serverStatusRequestReconciler struct.
 func NewServerStatusRequestReconciler(
-	client client.Client,
 	ctx context.Context,
+	client client.Client,
 	pluginRegistry PluginLister,
-	clock clock.Clock,
+	clock clocks.WithTickerAndDelayedExecution,
 	log logrus.FieldLogger) *serverStatusRequestReconciler {
 	return &serverStatusRequestReconciler{
 		client:         client,
@@ -74,9 +75,10 @@ func NewServerStatusRequestReconciler(
 
 // +kubebuilder:rbac:groups=velero.io,resources=serverstatusrequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=serverstatusrequests/status,verbs=get;update;patch
+
 func (r *serverStatusRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.log.WithFields(logrus.Fields{
-		"controller":          ServerStatusRequest,
+		"controller":          constant.ControllerServerStatusRequest,
 		"serverStatusRequest": req.NamespacedName,
 	})
 
@@ -94,7 +96,7 @@ func (r *serverStatusRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	log = r.log.WithFields(logrus.Fields{
-		"controller":          ServerStatusRequest,
+		"controller":          constant.ControllerServerStatusRequest,
 		"serverStatusRequest": req.NamespacedName,
 		"phase":               statusRequest.Status.Phase,
 	})

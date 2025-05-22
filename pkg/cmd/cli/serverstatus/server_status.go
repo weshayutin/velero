@@ -22,14 +22,14 @@ import (
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	veleroclient "github.com/vmware-tanzu/velero/pkg/client"
 )
 
-type ServerStatusGetter interface {
+type Getter interface {
 	GetServerStatus(kbClient kbclient.Client) (*velerov1api.ServerStatusRequest, error)
 }
 
@@ -41,14 +41,14 @@ type DefaultServerStatusGetter struct {
 func (g *DefaultServerStatusGetter) GetServerStatus(kbClient kbclient.Client) (*velerov1api.ServerStatusRequest, error) {
 	created := builder.ForServerStatusRequest(g.Namespace, "", "0").ObjectMeta(builder.WithGenerateName("velero-cli-")).Result()
 
-	if err := kbClient.Create(context.Background(), created, &kbclient.CreateOptions{}); err != nil {
+	if err := veleroclient.CreateRetryGenerateName(kbClient, context.Background(), created); err != nil {
 		return nil, errors.WithStack(err)
 	}
 
 	ctx, cancel := context.WithCancel(g.Context)
 	defer cancel()
 
-	key := client.ObjectKey{Name: created.Name, Namespace: g.Namespace}
+	key := kbclient.ObjectKey{Name: created.Name, Namespace: g.Namespace}
 	checkFunc := func() {
 		updated := &velerov1api.ServerStatusRequest{}
 		if err := kbClient.Get(ctx, key, updated); err != nil {

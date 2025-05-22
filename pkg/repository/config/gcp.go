@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//nolint:gosec
+//nolint:gosec // Internal usage. No need to check.
 package config
 
 import "os"
@@ -41,7 +41,6 @@ func GetGCPResticEnvVars(config map[string]string) (map[string]string, error) {
 func GetGCPCredentials(config map[string]string) string {
 	if credentialsFile, ok := config[CredentialsFileKey]; ok {
 		return credentialsFile
-	} else {
-		return os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
 	}
+	return os.Getenv(gcpCredentialsFileEnvVar)
 }

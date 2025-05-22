@@ -17,9 +17,10 @@ limitations under the License.
 package builder
 
 import (
-	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
-	v1 "k8s.io/api/core/v1"
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
+	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // VolumeSnapshotContentBuilder builds VolumeSnapshotContent object.
@@ -48,8 +49,8 @@ func (v *VolumeSnapshotContentBuilder) Result() *snapshotv1api.VolumeSnapshotCon
 }
 
 // Status initiates VolumeSnapshotContent's status.
-func (v *VolumeSnapshotContentBuilder) Status() *VolumeSnapshotContentBuilder {
-	v.object.Status = &snapshotv1api.VolumeSnapshotContentStatus{}
+func (v *VolumeSnapshotContentBuilder) Status(status *snapshotv1api.VolumeSnapshotContentStatus) *VolumeSnapshotContentBuilder {
+	v.object.Status = status
 	return v
 }
 
@@ -59,12 +60,39 @@ func (v *VolumeSnapshotContentBuilder) DeletionPolicy(policy snapshotv1api.Delet
 	return v
 }
 
-func (v *VolumeSnapshotContentBuilder) VolumeSnapshotRef(namespace, name string) *VolumeSnapshotContentBuilder {
-	v.object.Spec.VolumeSnapshotRef = v1.ObjectReference{
+// VolumeSnapshotRef sets the built VolumeSnapshotContent's spec.VolumeSnapshotRef value.
+func (v *VolumeSnapshotContentBuilder) VolumeSnapshotRef(namespace, name, uid string) *VolumeSnapshotContentBuilder {
+	v.object.Spec.VolumeSnapshotRef = corev1api.ObjectReference{
 		APIVersion: "snapshot.storage.k8s.io/v1",
 		Kind:       "VolumeSnapshot",
 		Namespace:  namespace,
 		Name:       name,
+		UID:        types.UID(uid),
 	}
+	return v
+}
+
+// VolumeSnapshotClassName sets the built VolumeSnapshotContent's spec.VolumeSnapshotClassName value.
+func (v *VolumeSnapshotContentBuilder) VolumeSnapshotClassName(name string) *VolumeSnapshotContentBuilder {
+	v.object.Spec.VolumeSnapshotClassName = &name
+	return v
+}
+
+// ObjectMeta applies functional options to the VolumeSnapshotContent's ObjectMeta.
+func (v *VolumeSnapshotContentBuilder) ObjectMeta(opts ...ObjectMetaOpt) *VolumeSnapshotContentBuilder {
+	for _, opt := range opts {
+		opt(v.object)
+	}
+
+	return v
+}
+
+func (v *VolumeSnapshotContentBuilder) Driver(driver string) *VolumeSnapshotContentBuilder {
+	v.object.Spec.Driver = driver
+	return v
+}
+
+func (v *VolumeSnapshotContentBuilder) Source(source snapshotv1api.VolumeSnapshotContentSource) *VolumeSnapshotContentBuilder {
+	v.object.Spec.Source = source
 	return v
 }

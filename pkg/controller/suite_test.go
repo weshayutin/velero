@@ -32,10 +32,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	velerov2alpha1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -72,7 +73,7 @@ var _ = BeforeSuite(func(done Done) {
 	}()
 
 	close(done)
-}, 60)
+})
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
@@ -96,6 +97,9 @@ type testEnvironment struct {
 func newTestEnvironment() *testEnvironment {
 	// scheme.Scheme is initialized with all native Kubernetes types
 	err := velerov1api.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = velerov2alpha1api.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	env = &envtest.Environment{

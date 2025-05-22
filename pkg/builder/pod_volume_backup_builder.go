@@ -53,7 +53,6 @@ func (b *PodVolumeBackupBuilder) ObjectMeta(opts ...ObjectMetaOpt) *PodVolumeBac
 	for _, opt := range opts {
 		opt(b.object)
 	}
-
 	return b
 }
 
@@ -81,6 +80,16 @@ func (b *PodVolumeBackupBuilder) SnapshotID(snapshotID string) *PodVolumeBackupB
 	return b
 }
 
+func (b *PodVolumeBackupBuilder) StartTimestamp(startTimestamp *metav1.Time) *PodVolumeBackupBuilder {
+	b.object.Status.StartTimestamp = startTimestamp
+	return b
+}
+
+func (b *PodVolumeBackupBuilder) CompletionTimestamp(completionTimestamp *metav1.Time) *PodVolumeBackupBuilder {
+	b.object.Status.CompletionTimestamp = completionTimestamp
+	return b
+}
+
 // PodName sets the name of the pod associated with this PodVolumeBackup.
 func (b *PodVolumeBackupBuilder) PodName(name string) *PodVolumeBackupBuilder {
 	b.object.Spec.Pod.Name = name
@@ -96,5 +105,11 @@ func (b *PodVolumeBackupBuilder) PodNamespace(ns string) *PodVolumeBackupBuilder
 // Volume sets the name of the volume associated with this PodVolumeBackup.
 func (b *PodVolumeBackupBuilder) Volume(volume string) *PodVolumeBackupBuilder {
 	b.object.Spec.Volume = volume
+	return b
+}
+
+// UploaderType sets the type of uploader to use for this PodVolumeBackup.
+func (b *PodVolumeBackupBuilder) UploaderType(uploaderType string) *PodVolumeBackupBuilder {
+	b.object.Spec.UploaderType = uploaderType
 	return b
 }

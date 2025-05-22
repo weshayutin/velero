@@ -18,6 +18,7 @@ package podexec
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/url"
 	"strings"
@@ -51,7 +52,7 @@ func TestNewPodCommandExecutor(t *testing.T) {
 func TestExecutePodCommandMissingInputs(t *testing.T) {
 	tests := []struct {
 		name         string
-		item         map[string]interface{}
+		item         map[string]any
 		podNamespace string
 		podName      string
 		hookName     string
@@ -62,22 +63,22 @@ func TestExecutePodCommandMissingInputs(t *testing.T) {
 		},
 		{
 			name: "missing pod namespace",
-			item: map[string]interface{}{},
+			item: map[string]any{},
 		},
 		{
 			name:         "missing pod name",
-			item:         map[string]interface{}{},
+			item:         map[string]any{},
 			podNamespace: "ns",
 		},
 		{
 			name:         "missing hookName",
-			item:         map[string]interface{}{},
+			item:         map[string]any{},
 			podNamespace: "ns",
 			podName:      "pod",
 		},
 		{
 			name:         "missing hook",
-			item:         map[string]interface{}{},
+			item:         map[string]any{},
 			podNamespace: "ns",
 			podName:      "pod",
 			hookName:     "hook",
@@ -211,11 +212,11 @@ func TestExecutePodCommand(t *testing.T) {
 			defer streamExecutorFactory.AssertExpectations(t)
 			podCommandExecutor.streamExecutorFactory = streamExecutorFactory
 
-			baseUrl, _ := url.Parse("https://some.server")
+			baseURL, _ := url.Parse("https://some.server")
 			contentConfig := rest.ClientContentConfig{
 				GroupVersion: schema.GroupVersion{Group: "", Version: "v1"},
 			}
-			poster.On("Post").Return(rest.NewRequestWithClient(baseUrl, "/api/v1", contentConfig, nil))
+			poster.On("Post").Return(rest.NewRequestWithClient(baseURL, "/api/v1", contentConfig, nil))
 
 			streamExecutor := &mockStreamExecutor{}
 			defer streamExecutor.AssertExpectations(t)
@@ -231,7 +232,7 @@ func TestExecutePodCommand(t *testing.T) {
 				Stdout: &stdout,
 				Stderr: &stderr,
 			}
-			streamExecutor.On("Stream", expectedStreamOptions).Return(test.hookError)
+			streamExecutor.On("StreamWithContext", mock.Anything, expectedStreamOptions).Return(test.hookError)
 
 			err = podCommandExecutor.ExecutePodCommand(velerotest.NewLogger(), pod, "namespace", "name", "hookName", &hook)
 			if test.expectedError != "" {
@@ -262,6 +263,37 @@ func TestEnsureContainerExists(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestPodCompeted(t *testing.T) {
+	pod := &corev1api.Pod{
+		Spec: corev1api.PodSpec{
+			Containers: []corev1api.Container{
+				{
+					Name: "foo",
+				},
+			},
+		},
+		Status: corev1api.PodStatus{
+			Phase: corev1api.PodSucceeded,
+		},
+	}
+
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
+	require.NoError(t, err)
+
+	clientConfig := &rest.Config{}
+	poster := &mockPoster{}
+	defer poster.AssertExpectations(t)
+	podCommandExecutor := NewPodCommandExecutor(clientConfig, poster).(*defaultPodCommandExecutor)
+
+	hook := v1.ExecHook{
+		Container: "foo",
+		Command:   []string{"some", "command"},
+	}
+
+	err = podCommandExecutor.ExecutePodCommand(velerotest.NewLogger(), obj, "namespace", "name", "hookName", &hook)
+	require.NoError(t, err)
+}
+
 type mockStreamExecutorFactory struct {
 	mock.Mock
 }
@@ -276,8 +308,8 @@ type mockStreamExecutor struct {
 	remotecommand.Executor
 }
 
-func (e *mockStreamExecutor) Stream(options remotecommand.StreamOptions) error {
-	args := e.Called(options)
+func (e *mockStreamExecutor) StreamWithContext(ctx context.Context, options remotecommand.StreamOptions) error {
+	args := e.Called(ctx, options)
 	return args.Error(0)
 }
 

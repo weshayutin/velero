@@ -24,14 +24,11 @@ import (
 	discoveryfake "k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-
-	"github.com/vmware-tanzu/velero/pkg/generated/clientset/versioned/fake"
 )
 
 // APIServer contains in-memory fakes for all of the relevant
 // Kubernetes API server clients.
 type APIServer struct {
-	VeleroClient    *fake.Clientset
 	KubeClient      *kubefake.Clientset
 	DynamicClient   *dynamicfake.FakeDynamicClient
 	DiscoveryClient *DiscoveryClient
@@ -43,7 +40,6 @@ func NewAPIServer(t *testing.T) *APIServer {
 	t.Helper()
 
 	var (
-		veleroClient  = fake.NewSimpleClientset()
 		kubeClient    = kubefake.NewSimpleClientset()
 		dynamicClient = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 			map[schema.GroupVersionResource]string{
@@ -56,14 +52,15 @@ func NewAPIServer(t *testing.T) *APIServer {
 				{Group: "apps", Version: "v1", Resource: "deployments"}:                                    "DeploymentsList",
 				{Group: "apiextensions.k8s.io", Version: "v1beta1", Resource: "customresourcedefinitions"}: "CRDList",
 				{Group: "velero.io", Version: "v1", Resource: "volumesnapshotlocations"}:                   "VSLList",
+				{Group: "velero.io", Version: "v1", Resource: "backups"}:                                   "BackupList",
 				{Group: "extensions", Version: "v1", Resource: "deployments"}:                              "ExtDeploymentsList",
 				{Group: "velero.io", Version: "v1", Resource: "deployments"}:                               "VeleroDeploymentsList",
+				{Group: "velero.io", Version: "v2alpha1", Resource: "datauploads"}:                         "DataUploadsList",
 			})
 		discoveryClient = &DiscoveryClient{FakeDiscovery: kubeClient.Discovery().(*discoveryfake.FakeDiscovery)}
 	)
 
 	return &APIServer{
-		VeleroClient:    veleroClient,
 		KubeClient:      kubeClient,
 		DynamicClient:   dynamicClient,
 		DiscoveryClient: discoveryClient,

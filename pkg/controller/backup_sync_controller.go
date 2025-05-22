@@ -18,21 +18,24 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
-	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	kuberrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/features"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
@@ -76,7 +79,7 @@ func NewBackupSyncReconciler(
 
 // Reconcile syncs between the backups in cluster and backups metadata in object store.
 func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := b.logger.WithField("controller", BackupSync)
+	log := b.logger.WithField("controller", constant.ControllerBackupSync)
 	log = log.WithField("backupLocation", req.String())
 	log.Debug("Begin to sync between backups' metadata in BSL object storage and cluster's existing backups.")
 
@@ -107,7 +110,7 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log.WithError(err).Error("Error listing backups in backup store")
 		return ctrl.Result{}, nil
 	}
-	backupStoreBackups := sets.NewString(res...)
+	backupStoreBackups := sets.New[string](res...)
 	log.WithField("backupCount", len(backupStoreBackups)).Debug("Got backups from backup store")
 
 	// get a list of all the backups that exist as custom resources in the cluster
@@ -125,7 +128,7 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// get a list of backups that *are* in the backup storage location and *aren't* in the cluster
-	clusterBackupsSet := sets.NewString()
+	clusterBackupsSet := sets.New[string]()
 	for _, b := range clusterBackupList.Items {
 		clusterBackupsSet.Insert(b.Name)
 	}
@@ -142,12 +145,33 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log = log.WithField("backup", backupName)
 		log.Info("Attempting to sync backup into cluster")
 
+		exist, err := backupStore.BackupExists(location.Spec.ObjectStorage.Bucket, backupName)
+		if err != nil {
+			log.WithError(errors.WithStack(err)).Error("Error checking backup exist from backup store")
+			continue
+		}
+		if !exist {
+			log.Debugf("backup %s doesn't exist in backup store, skip", backupName)
+			continue
+		}
+
 		backup, err := backupStore.GetBackupMetadata(backupName)
 		if err != nil {
 			log.WithError(errors.WithStack(err)).Error("Error getting backup metadata from backup store")
 			continue
 		}
 
+		if backup.Status.Phase == velerov1api.BackupPhaseWaitingForPluginOperations ||
+			backup.Status.Phase == velerov1api.BackupPhaseWaitingForPluginOperationsPartiallyFailed ||
+			backup.Status.Phase == velerov1api.BackupPhaseFinalizing ||
+			backup.Status.Phase == velerov1api.BackupPhaseFinalizingPartiallyFailed {
+			if backup.Status.Expiration == nil || backup.Status.Expiration.After(time.Now()) {
+				log.Debugf("Skipping non-expired incomplete backup %v", backup.Name)
+				continue
+			}
+			log.Debugf("%v Backup is past expiration, syncing for garbage collection", backup.Status.Phase)
+			backup.Status.Phase = velerov1api.BackupPhasePartiallyFailed
+		}
 		backup.Namespace = b.namespace
 		backup.ResourceVersion = ""
 
@@ -160,13 +184,16 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		backup.Labels[velerov1api.StorageLocationLabel] = label.GetValidName(backup.Spec.StorageLocation)
 
+		//check for the ownership references. If they do not exist, remove them.
+		backup.ObjectMeta.OwnerReferences = b.filterBackupOwnerReferences(ctx, backup, log)
+
 		// attempt to create backup custom resource via API
 		err = b.client.Create(ctx, backup, &client.CreateOptions{})
 		switch {
-		case err != nil && kuberrs.IsAlreadyExists(err):
+		case err != nil && apierrors.IsAlreadyExists(err):
 			log.Debug("Backup already exists in cluster")
 			continue
-		case err != nil && !kuberrs.IsAlreadyExists(err):
+		case err != nil && !apierrors.IsAlreadyExists(err):
 			log.WithError(errors.WithStack(err)).Error("Error syncing backup into cluster")
 			continue
 		default:
@@ -197,13 +224,14 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 			podVolumeBackup.Namespace = backup.Namespace
 			podVolumeBackup.ResourceVersion = ""
+			podVolumeBackup.Spec.BackupStorageLocation = location.Name
 
 			err = b.client.Create(ctx, podVolumeBackup, &client.CreateOptions{})
 			switch {
-			case err != nil && kuberrs.IsAlreadyExists(err):
+			case err != nil && apierrors.IsAlreadyExists(err):
 				log.Debug("Pod volume backup already exists in cluster")
 				continue
-			case err != nil && !kuberrs.IsAlreadyExists(err):
+			case err != nil && !apierrors.IsAlreadyExists(err):
 				log.WithError(errors.WithStack(err)).Error("Error syncing pod volume backup into cluster")
 				continue
 			default:
@@ -224,38 +252,14 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				vsClass.ResourceVersion = ""
 				err := b.client.Create(ctx, vsClass, &client.CreateOptions{})
 				switch {
-				case err != nil && kuberrs.IsAlreadyExists(err):
+				case err != nil && apierrors.IsAlreadyExists(err):
 					log.Debugf("VolumeSnapshotClass %s already exists in cluster", vsClass.Name)
 					continue
-				case err != nil && !kuberrs.IsAlreadyExists(err):
+				case err != nil && !apierrors.IsAlreadyExists(err):
 					log.WithError(errors.WithStack(err)).Errorf("Error syncing VolumeSnapshotClass %s into cluster", vsClass.Name)
 					continue
 				default:
 					log.Infof("Created CSI VolumeSnapshotClass %s", vsClass.Name)
-				}
-			}
-
-			log.Info("Syncing CSI volumesnapshotcontents in backup")
-			snapConts, err := backupStore.GetCSIVolumeSnapshotContents(backupName)
-			if err != nil {
-				log.WithError(errors.WithStack(err)).Error("Error getting CSI volumesnapshotcontents for this backup from backup store")
-				continue
-			}
-
-			log.Infof("Syncing %d CSI volumesnapshotcontents in backup", len(snapConts))
-			for _, snapCont := range snapConts {
-				// TODO: Reset ResourceVersion prior to persisting VolumeSnapshotContents
-				snapCont.ResourceVersion = ""
-				err := b.client.Create(ctx, snapCont, &client.CreateOptions{})
-				switch {
-				case err != nil && kuberrs.IsAlreadyExists(err):
-					log.Debugf("volumesnapshotcontent %s already exists in cluster", snapCont.Name)
-					continue
-				case err != nil && !kuberrs.IsAlreadyExists(err):
-					log.WithError(errors.WithStack(err)).Errorf("Error syncing volumesnapshotcontent %s into cluster", snapCont.Name)
-					continue
-				default:
-					log.Infof("Created CSI volumesnapshotcontent %s", snapCont.Name)
 				}
 			}
 		}
@@ -274,33 +278,63 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, nil
 }
 
+func (b *backupSyncReconciler) filterBackupOwnerReferences(ctx context.Context, backup *velerov1api.Backup, log logrus.FieldLogger) []metav1.OwnerReference {
+	listedReferences := backup.ObjectMeta.OwnerReferences
+	foundReferences := make([]metav1.OwnerReference, 0)
+	for _, v := range listedReferences {
+		switch v.Kind {
+		case "Schedule":
+			schedule := new(velerov1api.Schedule)
+			err := b.client.Get(ctx, types.NamespacedName{
+				Name:      v.Name,
+				Namespace: backup.Namespace,
+			}, schedule)
+			switch {
+			case err != nil && apierrors.IsNotFound(err):
+				log.Warnf("Removing missing schedule ownership reference %s/%s from backup", backup.Namespace, v.Name)
+				continue
+			case schedule.UID != v.UID:
+				log.Warnf("Removing schedule ownership reference with mismatched UIDs. Expected %s, got %s", v.UID, schedule.UID)
+				continue
+			case err != nil && !apierrors.IsNotFound(err):
+				log.WithError(errors.WithStack(err)).Error("Error finding schedule ownership reference, keeping schedule on backup")
+			}
+		default:
+			log.Warnf("Unable to check ownership reference for unknown kind, %s", v.Kind)
+		}
+		foundReferences = append(foundReferences, v)
+	}
+	return foundReferences
+}
+
 // SetupWithManager is used to setup controller and its watching sources.
 func (b *backupSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	backupSyncSource := kube.NewPeriodicalEnqueueSource(
-		b.logger,
-		mgr.GetClient(),
-		&velerov1api.BackupStorageLocationList{},
-		backupSyncReconcilePeriod,
-		kube.PeriodicalEnqueueSourceOption{
-			OrderFunc: backupSyncSourceOrderFunc,
-		},
-	)
-
 	gp := kube.NewGenericEventPredicate(func(object client.Object) bool {
 		location := object.(*velerov1api.BackupStorageLocation)
 		return b.locationFilterFunc(location)
 	})
+	backupSyncSource := kube.NewPeriodicalEnqueueSource(
+		b.logger.WithField("controller", constant.ControllerBackupSync),
+		mgr.GetClient(),
+		&velerov1api.BackupStorageLocationList{},
+		backupSyncReconcilePeriod,
+		kube.PeriodicalEnqueueSourceOption{
+			OrderFunc:  backupSyncSourceOrderFunc,
+			Predicates: []predicate.Predicate{gp},
+		},
+	)
 
 	return ctrl.NewControllerManagedBy(mgr).
 		// Filter all BSL events, because this controller is supposed to run periodically, not by event.
 		For(&velerov1api.BackupStorageLocation{}, builder.WithPredicates(kube.FalsePredicate{})).
-		Watches(backupSyncSource, nil, builder.WithPredicates(gp)).
+		WatchesRawSource(backupSyncSource).
+		Named(constant.ControllerBackupSync).
 		Complete(b)
 }
 
 // deleteOrphanedBackups deletes backup objects (CRDs) from Kubernetes that have the specified location
 // and a phase of Completed, but no corresponding backup in object storage.
-func (b *backupSyncReconciler) deleteOrphanedBackups(ctx context.Context, locationName string, backupStoreBackups sets.String, log logrus.FieldLogger) {
+func (b *backupSyncReconciler) deleteOrphanedBackups(ctx context.Context, locationName string, backupStoreBackups sets.Set[string], log logrus.FieldLogger) {
 	var backupList velerov1api.BackupList
 	listOption := client.ListOptions{
 		LabelSelector: labels.Set(map[string]string{
@@ -319,7 +353,7 @@ func (b *backupSyncReconciler) deleteOrphanedBackups(ctx context.Context, locati
 
 	for i, backup := range backupList.Items {
 		log = log.WithField("backup", backup.Name)
-		if backup.Status.Phase != velerov1api.BackupPhaseCompleted || backupStoreBackups.Has(backup.Name) {
+		if !(backup.Status.Phase == velerov1api.BackupPhaseCompleted || backup.Status.Phase == velerov1api.BackupPhasePartiallyFailed) || backupStoreBackups.Has(backup.Name) {
 			continue
 		}
 
@@ -387,7 +421,10 @@ func backupSyncSourceOrderFunc(objList client.ObjectList) client.ObjectList {
 				cpBsl := bsl
 				bslArray = append(bslArray, &cpBsl)
 			}
-			meta.SetList(resultBSLList, bslArray)
+			if err := meta.SetList(resultBSLList, bslArray); err != nil {
+				fmt.Printf("fail to sort BSL list: %s", err.Error())
+				return &velerov1api.BackupStorageLocationList{}
+			}
 
 			return resultBSLList
 		}

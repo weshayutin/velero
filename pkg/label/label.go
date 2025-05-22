@@ -18,6 +18,7 @@ package label
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,7 +28,7 @@ import (
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 )
 
-// GetValidName converts an input string to valid kubernetes label string in accordance to rfc1035 DNS Label spec
+// GetValidName converts an input string to valid Kubernetes label string in accordance to rfc1035 DNS Label spec
 // (https://github.com/kubernetes/community/blob/master/contributors/design-proposals/architecture/identifiers.md)
 // Length of the label is adjusted basis the DNS1035LabelMaxLength (defined at k8s.io/apimachinery/pkg/util/validation)
 // If length exceeds, we trim the label name to contain only max allowed characters
@@ -38,7 +39,7 @@ func GetValidName(label string) string {
 	}
 
 	sha := sha256.Sum256([]byte(label))
-	strSha := fmt.Sprintf("%x", sha)
+	strSha := hex.EncodeToString(sha[:])
 	charsFromLabel := validation.DNS1035LabelMaxLength - 6
 	if charsFromLabel < 0 {
 		// Derive the label name from sha hash in case the DNS1035LabelMaxLength is less than 6
@@ -60,4 +61,10 @@ func NewListOptionsForBackup(name string) metav1.ListOptions {
 	return metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", velerov1api.BackupNameLabel, GetValidName(name)),
 	}
+}
+
+// NewSelectorForRestore returns a Selector based on the restore name.
+// This is useful for interacting with Listers that need a Selector.
+func NewSelectorForRestore(name string) labels.Selector {
+	return labels.SelectorFromSet(map[string]string{velerov1api.RestoreNameLabel: GetValidName(name)})
 }

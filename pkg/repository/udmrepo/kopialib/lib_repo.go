@@ -19,7 +19,6 @@ package kopialib
 import (
 	"context"
 	"os"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -34,8 +33,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	"github.com/vmware-tanzu/velero/pkg/kopia"
 	"github.com/vmware-tanzu/velero/pkg/repository/udmrepo"
-	"github.com/vmware-tanzu/velero/pkg/util/logging"
 )
 
 type kopiaRepoService struct {
@@ -73,6 +72,8 @@ type kopiaObjectWriter struct {
 	rawWriter object.Writer
 }
 
+type openOptions struct{}
+
 const (
 	defaultLogInterval             = time.Second * 10
 	defaultMaintainCheckPeriod     = time.Hour
@@ -92,17 +93,16 @@ func NewKopiaRepoService(logger logrus.FieldLogger) udmrepo.BackupRepoService {
 }
 
 func (ks *kopiaRepoService) Init(ctx context.Context, repoOption udmrepo.RepoOptions, createNew bool) error {
-	repoCtx := logging.SetupKopiaLog(ctx, ks.logger)
+	repoCtx := kopia.SetupKopiaLog(ctx, ks.logger)
 
 	if createNew {
-		if err := CreateBackupRepo(repoCtx, repoOption); err != nil {
+		if err := CreateBackupRepo(repoCtx, repoOption, ks.logger); err != nil {
 			return err
 		}
 
 		return writeInitParameters(repoCtx, repoOption, ks.logger)
-	} else {
-		return ConnectBackupRepo(repoCtx, repoOption)
 	}
+	return ConnectBackupRepo(repoCtx, repoOption, ks.logger)
 }
 
 func (ks *kopiaRepoService) Open(ctx context.Context, repoOption udmrepo.RepoOptions) (udmrepo.BackupRepo, error) {
@@ -115,9 +115,9 @@ func (ks *kopiaRepoService) Open(ctx context.Context, repoOption udmrepo.RepoOpt
 		return nil, errors.Wrapf(err, "repo config %s doesn't exist", repoConfig)
 	}
 
-	repoCtx := logging.SetupKopiaLog(ctx, ks.logger)
+	repoCtx := kopia.SetupKopiaLog(ctx, ks.logger)
 
-	r, err := openKopiaRepo(repoCtx, repoConfig, repoOption.RepoPassword)
+	r, err := openKopiaRepo(repoCtx, repoConfig, repoOption.RepoPassword, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -158,12 +158,16 @@ func (ks *kopiaRepoService) Maintain(ctx context.Context, repoOption udmrepo.Rep
 		return errors.Wrapf(err, "repo config %s doesn't exist", repoConfig)
 	}
 
-	repoCtx := logging.SetupKopiaLog(ctx, ks.logger)
+	repoCtx := kopia.SetupKopiaLog(ctx, ks.logger)
 
-	r, err := openKopiaRepo(repoCtx, repoConfig, repoOption.RepoPassword)
+	ks.logger.Info("Start to open repo for maintenance, allow index write on load")
+
+	r, err := openKopiaRepo(repoCtx, repoConfig, repoOption.RepoPassword, nil)
 	if err != nil {
 		return err
 	}
+
+	ks.logger.Info("Succeeded to open repo for maintenance")
 
 	defer func() {
 		c := r.Close(repoCtx)
@@ -208,7 +212,7 @@ func (ks *kopiaRepoService) DefaultMaintenanceFrequency() time.Duration {
 }
 
 func (km *kopiaMaintenance) runMaintenance(ctx context.Context, rep repo.DirectRepositoryWriter) error {
-	err := snapshotmaintenance.Run(logging.SetupKopiaLog(ctx, km.logger), rep, km.mode, false, maintenance.SafetyFull)
+	err := snapshotmaintenance.Run(kopia.SetupKopiaLog(ctx, km.logger), rep, km.mode, false, maintenance.SafetyFull)
 	if err != nil {
 		return errors.Wrapf(err, "error to run maintenance under mode %s", km.mode)
 	}
@@ -235,7 +239,12 @@ func (kr *kopiaRepository) OpenObject(ctx context.Context, id udmrepo.ID) (udmre
 		return nil, errors.New("repo is closed or not open")
 	}
 
-	reader, err := kr.rawRepo.OpenObject(logging.SetupKopiaLog(ctx, kr.logger), object.ID(id))
+	objID, err := object.ParseID(string(id))
+	if err != nil {
+		return nil, errors.Wrapf(err, "error to parse object ID from %v", id)
+	}
+
+	reader, err := kr.rawRepo.OpenObject(kopia.SetupKopiaLog(ctx, kr.logger), objID)
 	if err != nil {
 		return nil, errors.Wrap(err, "error to open object")
 	}
@@ -250,7 +259,7 @@ func (kr *kopiaRepository) GetManifest(ctx context.Context, id udmrepo.ID, mani 
 		return errors.New("repo is closed or not open")
 	}
 
-	metadata, err := kr.rawRepo.GetManifest(logging.SetupKopiaLog(ctx, kr.logger), manifest.ID(id), mani.Payload)
+	metadata, err := kr.rawRepo.GetManifest(kopia.SetupKopiaLog(ctx, kr.logger), manifest.ID(id), mani.Payload)
 	if err != nil {
 		return errors.Wrap(err, "error to get manifest")
 	}
@@ -265,7 +274,7 @@ func (kr *kopiaRepository) FindManifests(ctx context.Context, filter udmrepo.Man
 		return nil, errors.New("repo is closed or not open")
 	}
 
-	metadata, err := kr.rawRepo.FindManifests(logging.SetupKopiaLog(ctx, kr.logger), filter.Labels)
+	metadata, err := kr.rawRepo.FindManifests(kopia.SetupKopiaLog(ctx, kr.logger), filter.Labels)
 	if err != nil {
 		return nil, errors.Wrap(err, "error to find manifests")
 	}
@@ -283,7 +292,7 @@ func (kr *kopiaRepository) Time() time.Time {
 
 func (kr *kopiaRepository) Close(ctx context.Context) error {
 	if kr.rawWriter != nil {
-		err := kr.rawWriter.Close(logging.SetupKopiaLog(ctx, kr.logger))
+		err := kr.rawWriter.Close(kopia.SetupKopiaLog(ctx, kr.logger))
 		if err != nil {
 			return errors.Wrap(err, "error to close repo writer")
 		}
@@ -292,7 +301,7 @@ func (kr *kopiaRepository) Close(ctx context.Context) error {
 	}
 
 	if kr.rawRepo != nil {
-		err := kr.rawRepo.Close(logging.SetupKopiaLog(ctx, kr.logger))
+		err := kr.rawRepo.Close(kopia.SetupKopiaLog(ctx, kr.logger))
 		if err != nil {
 			return errors.Wrap(err, "error to close repo")
 		}
@@ -308,11 +317,12 @@ func (kr *kopiaRepository) NewObjectWriter(ctx context.Context, opt udmrepo.Obje
 		return nil
 	}
 
-	writer := kr.rawWriter.NewObjectWriter(logging.SetupKopiaLog(ctx, kr.logger), object.WriterOptions{
-		Description: opt.Description,
-		Prefix:      index.ID(opt.Prefix),
-		AsyncWrites: getAsyncWrites(),
-		Compressor:  getCompressorForObject(opt),
+	writer := kr.rawWriter.NewObjectWriter(kopia.SetupKopiaLog(ctx, kr.logger), object.WriterOptions{
+		Description:        opt.Description,
+		Prefix:             index.IDPrefix(opt.Prefix),
+		AsyncWrites:        opt.AsyncWrites,
+		Compressor:         getCompressorForObject(opt),
+		MetadataCompressor: getMetadataCompressor(),
 	})
 
 	if writer == nil {
@@ -329,7 +339,7 @@ func (kr *kopiaRepository) PutManifest(ctx context.Context, manifest udmrepo.Rep
 		return "", errors.New("repo writer is closed or not open")
 	}
 
-	id, err := kr.rawWriter.PutManifest(logging.SetupKopiaLog(ctx, kr.logger), manifest.Metadata.Labels, manifest.Payload)
+	id, err := kr.rawWriter.PutManifest(kopia.SetupKopiaLog(ctx, kr.logger), manifest.Metadata.Labels, manifest.Payload)
 	if err != nil {
 		return "", errors.Wrap(err, "error to put manifest")
 	}
@@ -342,7 +352,7 @@ func (kr *kopiaRepository) DeleteManifest(ctx context.Context, id udmrepo.ID) er
 		return errors.New("repo writer is closed or not open")
 	}
 
-	err := kr.rawWriter.DeleteManifest(logging.SetupKopiaLog(ctx, kr.logger), manifest.ID(id))
+	err := kr.rawWriter.DeleteManifest(kopia.SetupKopiaLog(ctx, kr.logger), manifest.ID(id))
 	if err != nil {
 		return errors.Wrap(err, "error to delete manifest")
 	}
@@ -355,12 +365,47 @@ func (kr *kopiaRepository) Flush(ctx context.Context) error {
 		return errors.New("repo writer is closed or not open")
 	}
 
-	err := kr.rawWriter.Flush(logging.SetupKopiaLog(ctx, kr.logger))
+	err := kr.rawWriter.Flush(kopia.SetupKopiaLog(ctx, kr.logger))
 	if err != nil {
 		return errors.Wrap(err, "error to flush repo")
 	}
 
 	return nil
+}
+
+func (kr *kopiaRepository) GetAdvancedFeatures() udmrepo.AdvancedFeatureInfo {
+	return udmrepo.AdvancedFeatureInfo{
+		MultiPartBackup: true,
+	}
+}
+
+func (kr *kopiaRepository) ConcatenateObjects(ctx context.Context, objectIDs []udmrepo.ID) (udmrepo.ID, error) {
+	if kr.rawWriter == nil {
+		return "", errors.New("repo writer is closed or not open")
+	}
+
+	if len(objectIDs) == 0 {
+		return udmrepo.ID(""), errors.New("object list is empty")
+	}
+
+	rawIDs := []object.ID{}
+	for _, id := range objectIDs {
+		rawID, err := object.ParseID(string(id))
+		if err != nil {
+			return udmrepo.ID(""), errors.Wrapf(err, "error to parse object ID from %v", id)
+		}
+
+		rawIDs = append(rawIDs, rawID)
+	}
+
+	result, err := kr.rawWriter.ConcatenateObjects(ctx, rawIDs, repo.ConcatenateOptions{
+		Compressor: getMetadataCompressor(),
+	})
+	if err != nil {
+		return udmrepo.ID(""), errors.Wrap(err, "error to concatenate objects")
+	}
+
+	return udmrepo.ID(result.String()), nil
 }
 
 // updateProgress is called when the repository writes a piece of blob data to the storage during data write
@@ -439,7 +484,7 @@ func (kow *kopiaObjectWriter) Checkpoint() (udmrepo.ID, error) {
 		return udmrepo.ID(""), errors.Wrap(err, "error to checkpoint object")
 	}
 
-	return udmrepo.ID(id), nil
+	return udmrepo.ID(id.String()), nil
 }
 
 func (kow *kopiaObjectWriter) Result() (udmrepo.ID, error) {
@@ -452,7 +497,7 @@ func (kow *kopiaObjectWriter) Result() (udmrepo.ID, error) {
 		return udmrepo.ID(""), errors.Wrap(err, "error to wait object")
 	}
 
-	return udmrepo.ID(id), nil
+	return udmrepo.ID(id.String()), nil
 }
 
 func (kow *kopiaObjectWriter) Close() error {
@@ -470,29 +515,29 @@ func (kow *kopiaObjectWriter) Close() error {
 	return nil
 }
 
-// getAsyncWrites returns the number of concurrent async writes
-func getAsyncWrites() int {
-	return runtime.NumCPU()
-}
-
 // getCompressorForObject returns the compressor for an object, at present, we don't support compression
-func getCompressorForObject(opt udmrepo.ObjectWriteOptions) compression.Name {
+func getCompressorForObject(_ udmrepo.ObjectWriteOptions) compression.Name {
 	return ""
 }
 
-func getManifestEntryFromKopia(kMani *manifest.EntryMetadata) *udmrepo.ManifestEntryMetadata {
+// getMetadataCompressor returns the compressor for metadata, return kopia's default since we don't support compression
+func getMetadataCompressor() compression.Name {
+	return "zstd-fastest"
+}
+
+func getManifestEntryFromKopia(mani *manifest.EntryMetadata) *udmrepo.ManifestEntryMetadata {
 	return &udmrepo.ManifestEntryMetadata{
-		ID:      udmrepo.ID(kMani.ID),
-		Labels:  kMani.Labels,
-		Length:  int32(kMani.Length),
-		ModTime: kMani.ModTime,
+		ID:      udmrepo.ID(mani.ID),
+		Labels:  mani.Labels,
+		Length:  int32(mani.Length),
+		ModTime: mani.ModTime,
 	}
 }
 
-func getManifestEntriesFromKopia(kMani []*manifest.EntryMetadata) []*udmrepo.ManifestEntryMetadata {
+func getManifestEntriesFromKopia(mani []*manifest.EntryMetadata) []*udmrepo.ManifestEntryMetadata {
 	var ret []*udmrepo.ManifestEntryMetadata
 
-	for _, entry := range kMani {
+	for _, entry := range mani {
 		ret = append(ret, &udmrepo.ManifestEntryMetadata{
 			ID:      udmrepo.ID(entry.ID),
 			Labels:  entry.Labels,
@@ -515,7 +560,7 @@ func (lt *logThrottle) shouldLog() bool {
 	return false
 }
 
-func openKopiaRepo(ctx context.Context, configFile string, password string) (repo.Repository, error) {
+func openKopiaRepo(ctx context.Context, configFile string, password string, _ *openOptions) (repo.Repository, error) {
 	r, err := kopiaRepoOpen(ctx, configFile, password, &repo.Options{})
 	if os.IsNotExist(err) {
 		return nil, errors.Wrap(err, "error to open repo, repo doesn't exist")
@@ -529,7 +574,7 @@ func openKopiaRepo(ctx context.Context, configFile string, password string) (rep
 }
 
 func writeInitParameters(ctx context.Context, repoOption udmrepo.RepoOptions, logger logrus.FieldLogger) error {
-	r, err := openKopiaRepo(ctx, repoOption.ConfigFilePath, repoOption.RepoPassword)
+	r, err := openKopiaRepo(ctx, repoOption.ConfigFilePath, repoOption.RepoPassword, nil)
 	if err != nil {
 		return err
 	}
@@ -554,6 +599,32 @@ func writeInitParameters(ctx context.Context, repoOption udmrepo.RepoOptions, lo
 		if overwriteQuickMaintainInterval != time.Duration(0) {
 			logger.Infof("Quick maintenance interval change from %v to %v", p.QuickCycle.Interval, overwriteQuickMaintainInterval)
 			p.QuickCycle.Interval = overwriteQuickMaintainInterval
+		}
+		// the repoOption.StorageOptions are set via
+		// udmrepo.WithStoreOptions -> udmrepo.GetStoreOptions (interface)
+		// -> pkg/repository/provider.GetStoreOptions(param interface{}) -> pkg/repository/provider.getStorageVariables(..., backupRepoConfig)
+		// where backupRepoConfig comes from param.(RepoParam).BackupRepo.Spec.RepositoryConfig map[string]string
+		// where RepositoryConfig comes from pkg/controller/getBackupRepositoryConfig(...)
+		// where it gets a configMap name from pkg/cmd/server/config/Config.BackupRepoConfig
+		// which gets set via velero server flag `backup-repository-configmap` "The name of ConfigMap containing backup repository configurations."
+		// and data stored as json under ConfigMap.Data[repoType] where repoType is BackupRepository.Spec.RepositoryType: either kopia or restic
+		// repoOption.StorageOptions[udmrepo.StoreOptionKeyFullMaintenanceInterval] would for example look like
+		// configMapName.data.kopia: {"fullMaintenanceInterval": "eagerGC"}
+		fullMaintIntervalOption := udmrepo.FullMaintenanceIntervalOptions(repoOption.StorageOptions[udmrepo.StoreOptionKeyFullMaintenanceInterval])
+		priorMaintInterval := p.FullCycle.Interval
+		switch fullMaintIntervalOption {
+		case udmrepo.FastGC:
+			p.FullCycle.Interval = udmrepo.FastGCInterval
+		case udmrepo.EagerGC:
+			p.FullCycle.Interval = udmrepo.EagerGCInterval
+		case udmrepo.NormalGC:
+			p.FullCycle.Interval = udmrepo.NormalGCInterval
+		case "": // do nothing
+		default:
+			return errors.Errorf("invalid full maintenance interval option %s", fullMaintIntervalOption)
+		}
+		if priorMaintInterval != p.FullCycle.Interval {
+			logger.Infof("Full maintenance interval change from %v to %v", priorMaintInterval, p.FullCycle.Interval)
 		}
 
 		p.Owner = r.ClientOptions().UsernameAtHost()

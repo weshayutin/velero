@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -37,6 +39,7 @@ import (
 // corresponding expected Action, and that each expected Action
 // has a corresponding actual Action.
 func CompareActions(t *testing.T, expected, actual []core.Action) {
+	t.Helper()
 	assert.Len(t, actual, len(expected))
 
 	for _, e := range expected {
@@ -70,7 +73,8 @@ func CompareActions(t *testing.T, expected, actual []core.Action) {
 // that the action is a PatchAction, that the patch decodes from JSON
 // with the provided decode func and has no extraneous fields, and that
 // the decoded patch matches the expected.
-func ValidatePatch(t *testing.T, action core.Action, expected interface{}, decodeFunc func(*json.Decoder) (interface{}, error)) {
+func ValidatePatch(t *testing.T, action core.Action, expected any, decodeFunc func(*json.Decoder) (any, error)) {
+	t.Helper()
 	patchAction, ok := action.(core.PatchAction)
 	require.True(t, ok, "action is not a PatchAction")
 
@@ -93,7 +97,8 @@ func TimesAreEqual(t1, t2 time.Time) bool {
 // AssertDeepEqual asserts the semantic equality of objects.
 // This function exists in order to make sure time.Time and metav1.Time objects
 // can be compared correctly. See https://github.com/stretchr/testify/issues/502.
-func AssertDeepEqual(t *testing.T, expected, actual interface{}) bool {
+func AssertDeepEqual(t *testing.T, expected, actual any) bool {
+	t.Helper()
 	// By default, the equality.Semantic object doesn't have a function for comparing time.Times
 	err := equality.Semantic.AddFunc(TimesAreEqual)
 	if err != nil {
@@ -112,9 +117,15 @@ func AssertDeepEqual(t *testing.T, expected, actual interface{}) bool {
 // AssertErrorMatches asserts that if expected is the empty string, actual
 // is nil, otherwise, that actual's error string matches expected.
 func AssertErrorMatches(t *testing.T, expected string, actual error) bool {
+	t.Helper()
 	if expected != "" {
 		return assert.EqualError(t, actual, expected)
 	}
 
 	return assert.NoError(t, actual)
+}
+
+func CompareSlice(x, y []string) bool {
+	less := func(a, b string) bool { return a < b }
+	return cmp.Diff(x, y, cmpopts.SortSlices(less)) == ""
 }

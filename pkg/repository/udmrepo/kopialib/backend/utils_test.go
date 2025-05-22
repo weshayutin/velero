@@ -18,12 +18,13 @@ package backend
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/kopia/kopia/repo/logging"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	storagemocks "github.com/vmware-tanzu/velero/pkg/repository/udmrepo/kopialib/backend/mocks"
 )
@@ -31,13 +32,13 @@ import (
 func TestOptionalHaveBool(t *testing.T) {
 	var expectMsg string
 	testCases := []struct {
-		name          string
-		key           string
-		flags         map[string]string
-		logger        *storagemocks.Logger
-		retFuncErrorf func(mock.Arguments)
-		expectMsg     string
-		retValue      bool
+		name         string
+		key          string
+		flags        map[string]string
+		logger       *storagemocks.Core
+		retFuncCheck func(mock.Arguments)
+		expectMsg    string
+		retValue     bool
 	}{
 		{
 			name:     "key not exist",
@@ -59,9 +60,12 @@ func TestOptionalHaveBool(t *testing.T) {
 			flags: map[string]string{
 				"fake-key": "fake-value",
 			},
-			logger: new(storagemocks.Logger),
-			retFuncErrorf: func(args mock.Arguments) {
-				expectMsg = fmt.Sprintf(args[0].(string), args[1].(string), args[2].(string), args[3].(error))
+			logger: new(storagemocks.Core),
+			retFuncCheck: func(args mock.Arguments) {
+				ent := args[0].(zapcore.Entry)
+				if ent.Level == zapcore.ErrorLevel {
+					expectMsg = ent.Message
+				}
 			},
 			expectMsg: "Ignore fake-key, value [fake-value] is invalid, err strconv.ParseBool: parsing \"fake-value\": invalid syntax",
 			retValue:  false,
@@ -71,14 +75,80 @@ func TestOptionalHaveBool(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.logger != nil {
-				tc.logger.On("Errorf", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(tc.retFuncErrorf)
+				tc.logger.On("Enabled", mock.Anything).Return(true)
+				tc.logger.On("Check", mock.Anything, mock.Anything).Run(tc.retFuncCheck).Return(&zapcore.CheckedEntry{})
 			}
 
 			ctx := logging.WithLogger(context.Background(), func(module string) logging.Logger {
-				return tc.logger
+				return zap.New(tc.logger).Sugar()
 			})
 
 			retValue := optionalHaveBool(ctx, tc.key, tc.flags)
+
+			require.Equal(t, retValue, tc.retValue)
+			require.Equal(t, tc.expectMsg, expectMsg)
+		})
+	}
+}
+
+func TestOptionalHaveIntWithDefault(t *testing.T) {
+	var expectMsg string
+	testCases := []struct {
+		name         string
+		key          string
+		flags        map[string]string
+		defaultValue int64
+		logger       *storagemocks.Core
+		retFuncCheck func(mock.Arguments)
+		expectMsg    string
+		retValue     int64
+	}{
+		{
+			name:         "key not exist",
+			key:          "fake-key",
+			flags:        map[string]string{},
+			defaultValue: 2000,
+			retValue:     2000,
+		},
+		{
+			name: "value valid",
+			key:  "fake-key",
+			flags: map[string]string{
+				"fake-key": "1000",
+			},
+			retValue: 1000,
+		},
+		{
+			name: "value invalid",
+			key:  "fake-key",
+			flags: map[string]string{
+				"fake-key": "fake-value",
+			},
+			logger: new(storagemocks.Core),
+			retFuncCheck: func(args mock.Arguments) {
+				ent := args[0].(zapcore.Entry)
+				if ent.Level == zapcore.ErrorLevel {
+					expectMsg = ent.Message
+				}
+			},
+			expectMsg:    "Ignore fake-key, value [fake-value] is invalid, err strconv.ParseInt: parsing \"fake-value\": invalid syntax",
+			defaultValue: 2000,
+			retValue:     2000,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.logger != nil {
+				tc.logger.On("Enabled", mock.Anything).Return(true)
+				tc.logger.On("Check", mock.Anything, mock.Anything).Run(tc.retFuncCheck).Return(&zapcore.CheckedEntry{})
+			}
+
+			ctx := logging.WithLogger(context.Background(), func(module string) logging.Logger {
+				return zap.New(tc.logger).Sugar()
+			})
+
+			retValue := optionalHaveIntWithDefault(ctx, tc.key, tc.flags, tc.defaultValue)
 
 			require.Equal(t, retValue, tc.retValue)
 			require.Equal(t, tc.expectMsg, expectMsg)

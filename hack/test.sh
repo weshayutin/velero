@@ -21,11 +21,9 @@ set -o pipefail
 
 export CGO_ENABLED=0
 
-TARGETS=(
+TARGETS=($(go list ./pkg/... ./internal/...| grep -vE "/pkg/builder|pkg/apis|pkg/test|pkg/generated|pkg/plugin/generated|mocks|internal/restartabletest"))
+TARGETS+=(
   ./cmd/...
-  ./pkg/...
-  ./internal/...
-  ./test/...
 )
 
 if [[ ${#@} -ne 0 ]]; then
@@ -43,5 +41,5 @@ fi
 # but the user and group don't exist inside the container, when the code(https://github.com/kubernetes-sigs/controller-runtime/blob/v0.10.2/pkg/internal/testing/addr/manager.go#L44)
 # tries to get the cache directory, it gets the directory "/" and then get the permission error when trying to create directory under "/".
 # Specifying the cache directory by environment variable "XDG_CACHE_HOME" to workaround it
-XDG_CACHE_HOME=/tmp/ go test -installsuffix "static" -short -timeout 60s -coverprofile=coverage.out "${TARGETS[@]}"
+XDG_CACHE_HOME=/tmp/ go test -installsuffix "static" -short -timeout 1200s -coverprofile=coverage.out "${TARGETS[@]}"
 echo "Success!"

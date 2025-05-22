@@ -18,6 +18,7 @@ package output
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -46,12 +47,12 @@ func Describe(fn func(d *Describer)) string {
 	return d.buf.String()
 }
 
-func (d *Describer) Printf(msg string, args ...interface{}) {
+func (d *Describer) Printf(msg string, args ...any) {
 	fmt.Fprint(d.out, d.Prefix)
 	fmt.Fprintf(d.out, msg, args...)
 }
 
-func (d *Describer) Println(args ...interface{}) {
+func (d *Describer) Println(args ...any) {
 	fmt.Fprint(d.out, d.Prefix)
 	fmt.Fprintln(d.out, args...)
 }
@@ -118,4 +119,56 @@ func BoolPointerString(b *bool, falseString, trueString, nilString string) strin
 		return trueString
 	}
 	return falseString
+}
+
+type StructuredDescriber struct {
+	output map[string]any
+	format string
+}
+
+// NewStructuredDescriber creates a StructuredDescriber.
+func NewStructuredDescriber(format string) *StructuredDescriber {
+	return &StructuredDescriber{
+		output: make(map[string]any),
+		format: format,
+	}
+}
+
+// DescribeInSF returns the structured output based on the func
+// that applies StructuredDescriber to collect outputs.
+// This function takes arg 'format' for future format extension.
+func DescribeInSF(fn func(d *StructuredDescriber), format string) string {
+	d := NewStructuredDescriber(format)
+	fn(d)
+	return d.JSONEncode()
+}
+
+// Describe adds all types of argument to d.output.
+func (d *StructuredDescriber) Describe(name string, arg any) {
+	d.output[name] = arg
+}
+
+// DescribeMetadata describes standard object metadata.
+func (d *StructuredDescriber) DescribeMetadata(metadata metav1.ObjectMeta) {
+	metadataInfo := make(map[string]any)
+	metadataInfo["name"] = metadata.Name
+	metadataInfo["namespace"] = metadata.Namespace
+	metadataInfo["labels"] = metadata.Labels
+	metadataInfo["annotations"] = metadata.Annotations
+	d.Describe("metadata", metadataInfo)
+}
+
+// JSONEncode encodes d.output to json
+func (d *StructuredDescriber) JSONEncode() string {
+	byteBuffer := &bytes.Buffer{}
+	encoder := json.NewEncoder(byteBuffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "    ")
+
+	err := encoder.Encode(d.output)
+	if err != nil {
+		fmt.Printf("fail to encode %s", err.Error())
+		return ""
+	}
+	return byteBuffer.String()
 }

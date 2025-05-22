@@ -24,18 +24,24 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	v1 "k8s.io/api/core/v1"
+	corev1api "k8s.io/api/core/v1"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/restic"
 	"github.com/vmware-tanzu/velero/pkg/uploader"
+	uploaderutil "github.com/vmware-tanzu/velero/pkg/uploader/util"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 )
 
-// mainly used to make testing more convenient
-var ResticBackupCMDFunc = restic.BackupCommand
-var ResticRestoreCMDFunc = restic.RestoreCommand
+// resticBackupCMDFunc and resticRestoreCMDFunc are mainly used to make testing more convenient
+var resticBackupCMDFunc = restic.BackupCommand
+var resticBackupFunc = restic.RunBackup
+var resticGetSnapshotFunc = restic.GetSnapshotCommand
+var resticGetSnapshotIDFunc = restic.GetSnapshotID
+var resticRestoreCMDFunc = restic.RestoreCommand
+var resticTempCACertFileFunc = restic.TempCACertFile
+var resticCmdEnvFunc = restic.CmdEnv
 
 type resticProvider struct {
 	repoIdentifier  string
@@ -51,7 +57,7 @@ func NewResticUploaderProvider(
 	repoIdentifier string,
 	bsl *velerov1api.BackupStorageLocation,
 	credGetter *credentials.CredentialGetter,
-	repoKeySelector *v1.SecretKeySelector,
+	repoKeySelector *corev1api.SecretKeySelector,
 	log logrus.FieldLogger,
 ) (Provider, error) {
 	provider := resticProvider{
@@ -68,13 +74,13 @@ func NewResticUploaderProvider(
 
 	// if there's a caCert on the ObjectStorage, write it to disk so that it can be passed to restic
 	if bsl.Spec.ObjectStorage != nil && bsl.Spec.ObjectStorage.CACert != nil {
-		provider.caCertFile, err = restic.TempCACertFile(bsl.Spec.ObjectStorage.CACert, bsl.Name, filesystem.NewFileSystem())
+		provider.caCertFile, err = resticTempCACertFileFunc(bsl.Spec.ObjectStorage.CACert, bsl.Name, filesystem.NewFileSystem())
 		if err != nil {
 			return nil, errors.Wrap(err, "error create temp cert file")
 		}
 	}
 
-	provider.cmdEnv, err = restic.CmdEnv(bsl, credGetter.FromFile)
+	provider.cmdEnv, err = resticCmdEnvFunc(bsl, credGetter.FromFile)
 	if err != nil {
 		return nil, errors.Wrap(err, "error generating repository cmnd env")
 	}
@@ -112,11 +118,27 @@ func (rp *resticProvider) Close(ctx context.Context) error {
 func (rp *resticProvider) RunBackup(
 	ctx context.Context,
 	path string,
+	realSource string,
 	tags map[string]string,
+	forceFull bool,
 	parentSnapshot string,
-	updater uploader.ProgressUpdater) (string, bool, error) {
+	volMode uploader.PersistentVolumeMode,
+	uploaderCfg map[string]string,
+	updater uploader.ProgressUpdater) (string, bool, int64, error) {
 	if updater == nil {
-		return "", false, errors.New("Need to initial backup progress updater first")
+		return "", false, 0, errors.New("Need to initial backup progress updater first")
+	}
+
+	if path == "" {
+		return "", false, 0, errors.New("path is empty")
+	}
+
+	if realSource != "" {
+		return "", false, 0, errors.New("real source is not empty, this is not supported by restic uploader")
+	}
+
+	if volMode == uploader.PersistentVolumeBlock {
+		return "", false, 0, errors.New("unable to support block mode")
 	}
 
 	log := rp.log.WithFields(logrus.Fields{
@@ -124,7 +146,17 @@ func (rp *resticProvider) RunBackup(
 		"parentSnapshot": parentSnapshot,
 	})
 
-	backupCmd := ResticBackupCMDFunc(rp.repoIdentifier, rp.credentialsFile, path, tags)
+	if len(uploaderCfg) > 0 {
+		parallelFilesUpload, err := uploaderutil.GetParallelFilesUpload(uploaderCfg)
+		if err != nil {
+			return "", false, 0, errors.Wrap(err, "failed to get uploader config")
+		}
+		if parallelFilesUpload > 0 {
+			log.Warnf("ParallelFilesUpload is set to %d, but restic does not support parallel file uploads. Ignoring.", parallelFilesUpload)
+		}
+	}
+
+	backupCmd := resticBackupCMDFunc(rp.repoIdentifier, rp.credentialsFile, path, tags)
 	backupCmd.Env = rp.cmdEnv
 	backupCmd.CACertFile = rp.caCertFile
 	if len(rp.extraFlags) != 0 {
@@ -135,27 +167,27 @@ func (rp *resticProvider) RunBackup(
 		backupCmd.ExtraFlags = append(backupCmd.ExtraFlags, fmt.Sprintf("--parent=%s", parentSnapshot))
 	}
 
-	summary, stderrBuf, err := restic.RunBackup(backupCmd, log, updater)
+	summary, stderrBuf, err := resticBackupFunc(backupCmd, log, updater)
 	if err != nil {
 		if strings.Contains(stderrBuf, "snapshot is empty") {
 			log.Debugf("Restic backup got empty dir with %s path", path)
-			return "", true, nil
+			return "", true, 0, nil
 		}
-		return "", false, errors.WithStack(fmt.Errorf("error running restic backup command %s with error: %v stderr: %v", backupCmd.String(), err, stderrBuf))
+		return "", false, 0, errors.WithStack(fmt.Errorf("error running restic backup command %s with error: %v stderr: %v", backupCmd.String(), err, stderrBuf))
 	}
 	// GetSnapshotID
-	snapshotIdCmd := restic.GetSnapshotCommand(rp.repoIdentifier, rp.credentialsFile, tags)
-	snapshotIdCmd.Env = rp.cmdEnv
-	snapshotIdCmd.CACertFile = rp.caCertFile
+	snapshotIDCmd := resticGetSnapshotFunc(rp.repoIdentifier, rp.credentialsFile, tags)
+	snapshotIDCmd.Env = rp.cmdEnv
+	snapshotIDCmd.CACertFile = rp.caCertFile
 	if len(rp.extraFlags) != 0 {
-		snapshotIdCmd.ExtraFlags = append(snapshotIdCmd.ExtraFlags, rp.extraFlags...)
+		snapshotIDCmd.ExtraFlags = append(snapshotIDCmd.ExtraFlags, rp.extraFlags...)
 	}
-	snapshotID, err := restic.GetSnapshotID(snapshotIdCmd)
+	snapshotID, err := resticGetSnapshotIDFunc(snapshotIDCmd)
 	if err != nil {
-		return "", false, errors.WithStack(fmt.Errorf("error getting snapshot id with error: %v", err))
+		return "", false, 0, errors.WithStack(fmt.Errorf("error getting snapshot id with error: %v", err))
 	}
 	log.Infof("Run command=%s, stdout=%s, stderr=%s", backupCmd.String(), summary, stderrBuf)
-	return snapshotID, false, nil
+	return snapshotID, false, 0, nil
 }
 
 // RunRestore runs a `restore` command and monitors the volume size to
@@ -164,23 +196,59 @@ func (rp *resticProvider) RunRestore(
 	ctx context.Context,
 	snapshotID string,
 	volumePath string,
-	updater uploader.ProgressUpdater) error {
+	volMode uploader.PersistentVolumeMode,
+	uploaderCfg map[string]string,
+	updater uploader.ProgressUpdater) (int64, error) {
 	if updater == nil {
-		return errors.New("Need to initial backup progress updater first")
+		return 0, errors.New("Need to initial backup progress updater first")
 	}
 	log := rp.log.WithFields(logrus.Fields{
 		"snapshotID": snapshotID,
 		"volumePath": volumePath,
 	})
 
-	restoreCmd := ResticRestoreCMDFunc(rp.repoIdentifier, rp.credentialsFile, snapshotID, volumePath)
+	if volMode == uploader.PersistentVolumeBlock {
+		return 0, errors.New("unable to support block mode")
+	}
+
+	restoreCmd := resticRestoreCMDFunc(rp.repoIdentifier, rp.credentialsFile, snapshotID, volumePath)
 	restoreCmd.Env = rp.cmdEnv
 	restoreCmd.CACertFile = rp.caCertFile
 	if len(rp.extraFlags) != 0 {
 		restoreCmd.ExtraFlags = append(restoreCmd.ExtraFlags, rp.extraFlags...)
 	}
+
+	extraFlags, err := rp.parseRestoreExtraFlags(uploaderCfg)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to parse uploader config")
+	} else if len(extraFlags) != 0 {
+		restoreCmd.ExtraFlags = append(restoreCmd.ExtraFlags, extraFlags...)
+	}
+
 	stdout, stderr, err := restic.RunRestore(restoreCmd, log, updater)
 
-	log.Infof("Run command=%s, stdout=%s, stderr=%s", restoreCmd.Command, stdout, stderr)
-	return err
+	log.Infof("Run command=%v, stdout=%s, stderr=%s", restoreCmd, stdout, stderr)
+	return 0, err
+}
+
+func (rp *resticProvider) parseRestoreExtraFlags(uploaderCfg map[string]string) ([]string, error) {
+	extraFlags := []string{}
+	if len(uploaderCfg) == 0 {
+		return extraFlags, nil
+	}
+
+	writeSparseFiles, err := uploaderutil.GetWriteSparseFiles(uploaderCfg)
+	if err != nil {
+		return extraFlags, errors.Wrap(err, "failed to get uploader config")
+	}
+
+	if writeSparseFiles {
+		extraFlags = append(extraFlags, "--sparse")
+	}
+
+	if restoreConcurrency, err := uploaderutil.GetRestoreConcurrency(uploaderCfg); err == nil && restoreConcurrency > 0 {
+		return extraFlags, errors.New("restic does not support parallel restore")
+	}
+
+	return extraFlags, nil
 }

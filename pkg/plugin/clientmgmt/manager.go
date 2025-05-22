@@ -26,6 +26,7 @@ import (
 
 	biav1cli "github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt/backupitemaction/v1"
 	biav2cli "github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt/backupitemaction/v2"
+	ibav1cli "github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt/itemblockaction/v1"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt/process"
 	riav1cli "github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt/restoreitemaction/v1"
 	riav2cli "github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt/restoreitemaction/v2"
@@ -34,7 +35,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	biav1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/backupitemaction/v1"
 	biav2 "github.com/vmware-tanzu/velero/pkg/plugin/velero/backupitemaction/v2"
-	isv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/item_snapshotter/v1"
+	ibav1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/itemblockaction/v1"
 	riav1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/restoreitemaction/v1"
 	riav2 "github.com/vmware-tanzu/velero/pkg/plugin/velero/restoreitemaction/v2"
 	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
@@ -78,11 +79,11 @@ type Manager interface {
 	// GetDeleteItemAction returns the delete item action plugin for name.
 	GetDeleteItemAction(name string) (velero.DeleteItemAction, error)
 
-	// GetItemSnapshotter returns the item snapshotter plugin for name
-	GetItemSnapshotter(name string) (isv1.ItemSnapshotter, error)
+	// GetItemBlockActions returns all v1 ItemBlock action plugins.
+	GetItemBlockActions() ([]ibav1.ItemBlockAction, error)
 
-	// GetItemSnapshotters returns all item snapshotter plugins
-	GetItemSnapshotters() ([]isv1.ItemSnapshotter, error)
+	// GetItemBlockAction returns the ItemBlock action plugin for name.
+	GetItemBlockAction(name string) (ibav1.ItemBlockAction, error)
 
 	// CleanupClients terminates all of the Manager's running plugin processes.
 	CleanupClients()
@@ -381,27 +382,16 @@ func (m *manager) GetDeleteItemAction(name string) (velero.DeleteItemAction, err
 	return r, nil
 }
 
-func (m *manager) GetItemSnapshotter(name string) (isv1.ItemSnapshotter, error) {
-	name = sanitizeName(name)
+// GetItemBlockActions returns all ItemBlock actions as restartableItemBlockActions.
+func (m *manager) GetItemBlockActions() ([]ibav1.ItemBlockAction, error) {
+	list := m.registry.List(common.PluginKindItemBlockAction)
 
-	restartableProcess, err := m.getRestartableProcess(common.PluginKindItemSnapshotter, name)
-	if err != nil {
-		return nil, err
-	}
-
-	r := NewRestartableItemSnapshotter(name, restartableProcess)
-	return r, nil
-}
-
-func (m *manager) GetItemSnapshotters() ([]isv1.ItemSnapshotter, error) {
-	list := m.registry.List(common.PluginKindItemSnapshotter)
-
-	actions := make([]isv1.ItemSnapshotter, 0, len(list))
+	actions := make([]ibav1.ItemBlockAction, 0, len(list))
 
 	for i := range list {
 		id := list[i]
 
-		r, err := m.GetItemSnapshotter(id.Name)
+		r, err := m.GetItemBlockAction(id.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -410,6 +400,24 @@ func (m *manager) GetItemSnapshotters() ([]isv1.ItemSnapshotter, error) {
 	}
 
 	return actions, nil
+}
+
+// GetItemBlockAction returns a restartableItemBlockAction for name.
+func (m *manager) GetItemBlockAction(name string) (ibav1.ItemBlockAction, error) {
+	name = sanitizeName(name)
+
+	for _, adaptedItemBlockAction := range ibav1cli.AdaptedItemBlockActions() {
+		restartableProcess, err := m.getRestartableProcess(adaptedItemBlockAction.Kind, name)
+		// Check if plugin was not found
+		if errors.As(err, &pluginNotFoundErrType) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return adaptedItemBlockAction.GetRestartable(name, restartableProcess), nil
+	}
+	return nil, fmt.Errorf("unable to get valid ItemBlockAction for %q", name)
 }
 
 // sanitizeName adds "velero.io" to legacy plugins that weren't namespaced.

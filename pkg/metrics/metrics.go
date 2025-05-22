@@ -66,6 +66,14 @@ const (
 	podVolumeOperationLatencySeconds      = "pod_volume_operation_latency_seconds"
 	podVolumeOperationLatencyGaugeSeconds = "pod_volume_operation_latency_seconds_gauge"
 
+	// data mover metrics
+	DataUploadSuccessTotal   = "data_upload_success_total"
+	DataUploadFailureTotal   = "data_upload_failure_total"
+	DataUploadCancelTotal    = "data_upload_cancel_total"
+	DataDownloadSuccessTotal = "data_download_success_total"
+	DataDownloadFailureTotal = "data_download_failure_total"
+	DataDownloadCancelTotal  = "data_download_cancel_total"
+
 	// Labels
 	nodeMetricLabel         = "node"
 	podVolumeOperationLabel = "operation"
@@ -319,7 +327,7 @@ func NewServerMetrics() *ServerMetrics {
 	}
 }
 
-func NewPodVolumeMetrics() *ServerMetrics {
+func NewNodeMetrics() *ServerMetrics {
 	return &ServerMetrics{
 		metrics: map[string]prometheus.Collector{
 			podVolumeBackupEnqueueTotal: prometheus.NewCounterVec(
@@ -364,6 +372,54 @@ func NewPodVolumeMetrics() *ServerMetrics {
 					},
 				},
 				[]string{nodeMetricLabel, podVolumeOperationLabel, backupNameLabel, pvbNameLabel},
+			),
+			DataUploadSuccessTotal: prometheus.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: podVolumeMetricsNamespace,
+					Name:      DataUploadSuccessTotal,
+					Help:      "Total number of successful uploaded snapshots",
+				},
+				[]string{nodeMetricLabel},
+			),
+			DataUploadFailureTotal: prometheus.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: podVolumeMetricsNamespace,
+					Name:      DataUploadFailureTotal,
+					Help:      "Total number of failed uploaded snapshots",
+				},
+				[]string{nodeMetricLabel},
+			),
+			DataUploadCancelTotal: prometheus.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: podVolumeMetricsNamespace,
+					Name:      DataUploadCancelTotal,
+					Help:      "Total number of canceled uploaded snapshots",
+				},
+				[]string{nodeMetricLabel},
+			),
+			DataDownloadSuccessTotal: prometheus.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: podVolumeMetricsNamespace,
+					Name:      DataDownloadSuccessTotal,
+					Help:      "Total number of successful downloaded snapshots",
+				},
+				[]string{nodeMetricLabel},
+			),
+			DataDownloadFailureTotal: prometheus.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: podVolumeMetricsNamespace,
+					Name:      DataDownloadFailureTotal,
+					Help:      "Total number of failed downloaded snapshots",
+				},
+				[]string{nodeMetricLabel},
+			),
+			DataDownloadCancelTotal: prometheus.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: podVolumeMetricsNamespace,
+					Name:      DataDownloadCancelTotal,
+					Help:      "Total number of canceled downloaded snapshots",
+				},
+				[]string{nodeMetricLabel},
 			),
 		},
 	}
@@ -412,7 +468,7 @@ func (m *ServerMetrics) InitSchedule(scheduleName string) {
 		c.WithLabelValues(scheduleName).Add(0)
 	}
 	if c, ok := m.metrics[backupLastStatus].(*prometheus.GaugeVec); ok {
-		c.WithLabelValues(scheduleName).Add(0)
+		c.WithLabelValues(scheduleName).Set(float64(1))
 	}
 	if c, ok := m.metrics[restoreAttemptTotal].(*prometheus.CounterVec); ok {
 		c.WithLabelValues(scheduleName).Add(0)
@@ -449,12 +505,112 @@ func (m *ServerMetrics) InitSchedule(scheduleName string) {
 	}
 }
 
-// InitSchedule initializes counter metrics for a node.
-func (m *ServerMetrics) InitPodVolumeMetricsForNode(node string) {
+// RemoveSchedule removes metrics associated with a specified schedule.
+func (m *ServerMetrics) RemoveSchedule(scheduleName string) {
+	if g, ok := m.metrics[backupTarballSizeBytesGauge].(*prometheus.GaugeVec); ok {
+		g.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupPartialFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupValidationFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if h, ok := m.metrics[backupDurationSeconds].(*prometheus.HistogramVec); ok {
+		h.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupDeletionAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupDeletionSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupDeletionFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if g, ok := m.metrics[backupLastSuccessfulTimestamp].(*prometheus.GaugeVec); ok {
+		g.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupItemsTotalGauge].(*prometheus.GaugeVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupItemsErrorsGauge].(*prometheus.GaugeVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupWarningTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupLastStatus].(*prometheus.GaugeVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restoreAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restorePartialFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restoreFailedTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restoreSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restoreValidationFailedTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[volumeSnapshotSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[volumeSnapshotAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[volumeSnapshotFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[csiSnapshotAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName, "")
+	}
+	if c, ok := m.metrics[csiSnapshotSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName, "")
+	}
+	if c, ok := m.metrics[csiSnapshotFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName, "")
+	}
+}
+
+// InitMetricsForNode initializes counter metrics for a node.
+func (m *ServerMetrics) InitMetricsForNode(node string) {
 	if c, ok := m.metrics[podVolumeBackupEnqueueTotal].(*prometheus.CounterVec); ok {
 		c.WithLabelValues(node).Add(0)
 	}
 	if c, ok := m.metrics[podVolumeBackupDequeueTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Add(0)
+	}
+	if c, ok := m.metrics[DataUploadSuccessTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Add(0)
+	}
+	if c, ok := m.metrics[DataUploadFailureTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Add(0)
+	}
+	if c, ok := m.metrics[DataUploadCancelTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Add(0)
+	}
+	if c, ok := m.metrics[DataDownloadSuccessTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Add(0)
+	}
+	if c, ok := m.metrics[DataDownloadFailureTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Add(0)
+	}
+	if c, ok := m.metrics[DataDownloadCancelTotal].(*prometheus.CounterVec); ok {
 		c.WithLabelValues(node).Add(0)
 	}
 }
@@ -469,6 +625,48 @@ func (m *ServerMetrics) RegisterPodVolumeBackupEnqueue(node string) {
 // RegisterPodVolumeBackupDequeue records dequeuing of a PodVolumeBackup object.
 func (m *ServerMetrics) RegisterPodVolumeBackupDequeue(node string) {
 	if c, ok := m.metrics[podVolumeBackupDequeueTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Inc()
+	}
+}
+
+// RegisterDataUploadSuccess records successful uploaded snapshots.
+func (m *ServerMetrics) RegisterDataUploadSuccess(node string) {
+	if c, ok := m.metrics[DataUploadSuccessTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Inc()
+	}
+}
+
+// RegisterDataUploadFailure records failed uploaded snapshots.
+func (m *ServerMetrics) RegisterDataUploadFailure(node string) {
+	if c, ok := m.metrics[DataUploadFailureTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Inc()
+	}
+}
+
+// RegisterDataUploadCancel records canceled uploaded snapshots.
+func (m *ServerMetrics) RegisterDataUploadCancel(node string) {
+	if c, ok := m.metrics[DataUploadCancelTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Inc()
+	}
+}
+
+// RegisterDataDownloadSuccess records successful downloaded snapshots.
+func (m *ServerMetrics) RegisterDataDownloadSuccess(node string) {
+	if c, ok := m.metrics[DataDownloadSuccessTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Inc()
+	}
+}
+
+// RegisterDataDownloadFailure records failed downloaded snapshots.
+func (m *ServerMetrics) RegisterDataDownloadFailure(node string) {
+	if c, ok := m.metrics[DataDownloadFailureTotal].(*prometheus.CounterVec); ok {
+		c.WithLabelValues(node).Inc()
+	}
+}
+
+// RegisterDataDownloadCancel records canceled downloaded snapshots.
+func (m *ServerMetrics) RegisterDataDownloadCancel(node string) {
+	if c, ok := m.metrics[DataDownloadCancelTotal].(*prometheus.CounterVec); ok {
 		c.WithLabelValues(node).Inc()
 	}
 }

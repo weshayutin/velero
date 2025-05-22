@@ -27,7 +27,7 @@ import (
 // NewUnpauseCommand creates the command for unpause
 func NewUnpauseCommand(f client.Factory, use string) *cobra.Command {
 	o := cli.NewSelectOptions("pause", "schedule")
-
+	pauseOpts := NewPauseOptions()
 	c := &cobra.Command{
 		Use:   use,
 		Short: "Unpause schedules",
@@ -37,7 +37,7 @@ func NewUnpauseCommand(f client.Factory, use string) *cobra.Command {
   # Unpause schedules named "schedule-1" and "schedule-2".
   velero schedule unpause schedule-1 schedule-2
 
-  # Unpause all schedules labelled with "foo=bar".
+  # Unpause all schedules labeled with "foo=bar".
   velero schedule unpause --selector foo=bar
 
   # Unpause all schedules.
@@ -45,11 +45,12 @@ func NewUnpauseCommand(f client.Factory, use string) *cobra.Command {
 		Run: func(c *cobra.Command, args []string) {
 			cmd.CheckError(o.Complete(args))
 			cmd.CheckError(o.Validate())
-			cmd.CheckError(runPause(f, o, false))
+			cmd.CheckError(runPause(f, o, false, pauseOpts.SkipOptions.SkipImmediately.Value))
 		},
 	}
 
 	o.BindFlags(c.Flags())
+	pauseOpts.BindFlags(c.Flags())
 
 	return c
 }

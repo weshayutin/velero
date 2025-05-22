@@ -1,5 +1,5 @@
 /*
-Copyright 2019 the Velero contributors.
+Copyright the Velero contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -44,9 +44,9 @@ func TestRequest_BackupResourceList(t *testing.T) {
 			name:     "my-pv",
 		},
 	}
-	backedUpItems := map[itemKey]struct{}{}
+	backedUpItems := NewBackedUpItemsMap()
 	for _, it := range items {
-		backedUpItems[it] = struct{}{}
+		backedUpItems.AddItem(it)
 	}
 
 	req := Request{BackedUpItems: backedUpItems}
@@ -70,9 +70,9 @@ func TestRequest_BackupResourceListEntriesSorted(t *testing.T) {
 			namespace: "ns1",
 		},
 	}
-	backedUpItems := map[itemKey]struct{}{}
+	backedUpItems := NewBackedUpItemsMap()
 	for _, it := range items {
-		backedUpItems[it] = struct{}{}
+		backedUpItems.AddItem(it)
 	}
 
 	req := Request{BackedUpItems: backedUpItems}

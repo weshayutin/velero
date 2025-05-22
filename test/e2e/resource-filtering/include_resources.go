@@ -17,7 +17,6 @@ limitations under the License.
 package filtering
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -25,9 +24,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	. "github.com/vmware-tanzu/velero/test/e2e"
 	. "github.com/vmware-tanzu/velero/test/e2e/test"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
 
 /*
@@ -47,9 +45,9 @@ var RestoreWithIncludeResources func() = TestFunc(&IncludeResources{testInRestor
 
 func (i *IncludeResources) Init() error {
 	i.FilteringCase.Init()
-	i.NSBaseName = "include-resources-" + UUIDgen.String()
+	i.CaseBaseName = "include-resources-" + i.UUIDgen
 	for nsNum := 0; nsNum < i.NamespacesTotal; nsNum++ {
-		createNSName := fmt.Sprintf("%s-%00000d", i.NSBaseName, nsNum)
+		createNSName := fmt.Sprintf("%s-%00000d", i.CaseBaseName, nsNum)
 		*i.NSIncluded = append(*i.NSIncluded, createNSName)
 	}
 	if i.IsTestInBackup { // testing case backup with include-resources option
@@ -58,16 +56,16 @@ func (i *IncludeResources) Init() error {
 			Text:      "Should backup resources which is included others should not be backup",
 			FailedMSG: "Failed to backup with resource include",
 		}
-		i.BackupName = "backup-include-resources-" + UUIDgen.String()
-		i.RestoreName = "restore-" + UUIDgen.String()
+		i.BackupName = "backup-" + i.CaseBaseName
+		i.RestoreName = "restore-" + i.UUIDgen
 		i.BackupArgs = []string{
-			"create", "--namespace", VeleroCfg.VeleroNamespace, "backup", i.BackupName,
+			"create", "--namespace", i.VeleroCfg.VeleroNamespace, "backup", i.BackupName,
 			"--include-resources", "deployments,configmaps",
 			"--default-volumes-to-fs-backup", "--wait",
 		}
 
 		i.RestoreArgs = []string{
-			"create", "--namespace", VeleroCfg.VeleroNamespace, "restore", i.RestoreName,
+			"create", "--namespace", i.VeleroCfg.VeleroNamespace, "restore", i.RestoreName,
 			"--from-backup", i.BackupName, "--wait",
 		}
 	} else { // testing case restore with include-resources option
@@ -76,15 +74,15 @@ func (i *IncludeResources) Init() error {
 			Text:      "Should restore resources which is included others should not be backup",
 			FailedMSG: "Failed to restore with resource include",
 		}
-		i.BackupName = "backup-" + UUIDgen.String()
-		i.RestoreName = "restore-include-resources-" + UUIDgen.String()
+		i.BackupName = "backup-" + i.UUIDgen
+		i.RestoreName = "restore-" + i.CaseBaseName
 		i.BackupArgs = []string{
-			"create", "--namespace", VeleroCfg.VeleroNamespace, "backup", i.BackupName,
+			"create", "--namespace", i.VeleroCfg.VeleroNamespace, "backup", i.BackupName,
 			"--include-namespaces", strings.Join(*i.NSIncluded, ","),
 			"--default-volumes-to-fs-backup", "--wait",
 		}
 		i.RestoreArgs = []string{
-			"create", "--namespace", VeleroCfg.VeleroNamespace, "restore", i.RestoreName,
+			"create", "--namespace", i.VeleroCfg.VeleroNamespace, "restore", i.RestoreName,
 			"--include-resources", "deployments,configmaps",
 			"--from-backup", i.BackupName, "--wait",
 		}
@@ -94,30 +92,30 @@ func (i *IncludeResources) Init() error {
 
 func (i *IncludeResources) Verify() error {
 	for nsNum := 0; nsNum < i.NamespacesTotal; nsNum++ {
-		namespace := fmt.Sprintf("%s-%00000d", i.NSBaseName, nsNum)
+		namespace := fmt.Sprintf("%s-%00000d", i.CaseBaseName, nsNum)
 		fmt.Printf("Checking resources in namespaces ...%s\n", namespace)
 		//Check deployment
-		_, err := GetDeployment(i.Client.ClientGo, namespace, i.NSBaseName)
+		_, err := GetDeployment(i.Client.ClientGo, namespace, i.CaseBaseName)
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to list deployment in namespace: %q", namespace))
 		}
 		//Check secrets
-		secretsList, err := i.Client.ClientGo.CoreV1().Secrets(namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: i.labelSelector})
+		secretsList, err := i.Client.ClientGo.CoreV1().Secrets(namespace).List(i.Ctx, metav1.ListOptions{LabelSelector: i.labelSelector})
 		if err != nil {
 			if apierrors.IsNotFound(err) { //resource should be excluded
 				return nil
 			}
 			return errors.Wrap(err, fmt.Sprintf("failed to list secrets in namespace: %q", namespace))
 		} else if len(secretsList.Items) != 0 {
-			return errors.Errorf(fmt.Sprintf("Should no secrets found  %s in namespace: %q", secretsList.Items[0].Name, namespace))
+			return errors.Errorf("Should no secrets found  %s in namespace: %q", secretsList.Items[0].Name, namespace)
 		}
 
 		//Check configmap
-		configmapList, err := i.Client.ClientGo.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: i.labelSelector})
+		configmapList, err := i.Client.ClientGo.CoreV1().ConfigMaps(namespace).List(i.Ctx, metav1.ListOptions{LabelSelector: i.labelSelector})
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to list configmap in namespace: %q", namespace))
 		} else if len(configmapList.Items) == 0 {
-			return errors.Errorf(fmt.Sprintf("Should have configmap found in namespace: %q", namespace))
+			return errors.Errorf("Should have configmap found in namespace: %q", namespace)
 		}
 	}
 	return nil

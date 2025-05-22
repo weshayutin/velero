@@ -21,17 +21,16 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/sirupsen/logrus"
-
-	corev1 "k8s.io/api/core/v1"
+	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/clock"
+	testclocks "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -39,10 +38,9 @@ import (
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/datapath"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
-	"github.com/vmware-tanzu/velero/pkg/uploader"
-	"github.com/vmware-tanzu/velero/pkg/uploader/provider"
 )
 
 const name = "pvb-1"
@@ -63,7 +61,7 @@ func pvbBuilder() *builder.PodVolumeBackupBuilder {
 func podBuilder() *builder.PodBuilder {
 	return builder.
 		ForPod(velerov1api.DefaultNamespace, name).
-		Volumes(&corev1.Volume{Name: "pvb-1-volume"})
+		Volumes(&corev1api.Volume{Name: "pvb-1-volume"})
 }
 
 func bslBuilder() *builder.BackupStorageLocationBuilder {
@@ -93,45 +91,78 @@ func buildBackupRepo() *velerov1api.BackupRepository {
 	}
 }
 
+type fakeFSBR struct {
+	pvb    *velerov1api.PodVolumeBackup
+	client kbclient.Client
+	clock  clock.WithTickerAndDelayedExecution
+}
+
+func (b *fakeFSBR) Init(ctx context.Context, param any) error {
+	return nil
+}
+
+func (b *fakeFSBR) StartBackup(source datapath.AccessPoint, uploaderConfigs map[string]string, param any) error {
+	pvb := b.pvb
+
+	original := b.pvb.DeepCopy()
+	pvb.Status.Phase = velerov1api.PodVolumeBackupPhaseCompleted
+	pvb.Status.CompletionTimestamp = &metav1.Time{Time: b.clock.Now()}
+
+	b.client.Patch(ctx, pvb, kbclient.MergeFrom(original))
+
+	return nil
+}
+
+func (b *fakeFSBR) StartRestore(snapshotID string, target datapath.AccessPoint, uploaderConfigs map[string]string) error {
+	return nil
+}
+
+func (b *fakeFSBR) Cancel() {
+}
+
+func (b *fakeFSBR) Close(ctx context.Context) {
+}
+
 var _ = Describe("PodVolumeBackup Reconciler", func() {
 	type request struct {
 		pvb               *velerov1api.PodVolumeBackup
-		pod               *corev1.Pod
+		pod               *corev1api.Pod
 		bsl               *velerov1api.BackupStorageLocation
 		backupRepo        *velerov1api.BackupRepository
 		expectedProcessed bool
 		expected          *velerov1api.PodVolumeBackup
 		expectedRequeue   ctrl.Result
 		expectedErrMsg    string
+		dataMgr           *datapath.Manager
 	}
 
 	// `now` will be used to set the fake clock's time; capture
 	// it here so it can be referenced in the test case defs.
 	now, err := time.Parse(time.RFC1123, time.RFC1123)
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 	now = now.Local()
 
 	DescribeTable("a pod volume backup",
 		func(test request) {
 			ctx := context.Background()
 
-			fakeClient := fake.NewFakeClientWithScheme(scheme.Scheme)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
 			err = fakeClient.Create(ctx, test.pvb)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			err = fakeClient.Create(ctx, test.pod)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			err = fakeClient.Create(ctx, test.bsl)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			err = fakeClient.Create(ctx, test.backupRepo)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			fakeFS := velerotest.NewFakeFileSystem()
 			pathGlob := fmt.Sprintf("/host_pods/%s/volumes/*/%s", "", "pvb-1-volume")
 			_, err = fakeFS.Create(pathGlob)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			credentialFileStore, err := credentials.NewNamespacedFileStore(
 				fakeClient,
@@ -140,20 +171,33 @@ var _ = Describe("PodVolumeBackup Reconciler", func() {
 				fakeFS,
 			)
 
+			Expect(err).ToNot(HaveOccurred())
+
+			if test.dataMgr == nil {
+				test.dataMgr = datapath.NewManager(1)
+			}
+
+			datapath.FSBRCreator = func(string, string, kbclient.Client, string, datapath.Callbacks, logrus.FieldLogger) datapath.AsyncBR {
+				return &fakeFSBR{
+					pvb:    test.pvb,
+					client: fakeClient,
+					clock:  testclocks.NewFakeClock(now),
+				}
+			}
+
 			// Setup reconciler
 			Expect(velerov1api.AddToScheme(scheme.Scheme)).To(Succeed())
 			r := PodVolumeBackupReconciler{
 				Client:           fakeClient,
-				Clock:            clock.NewFakeClock(now),
-				Metrics:          metrics.NewPodVolumeMetrics(),
-				CredentialGetter: &credentials.CredentialGetter{FromFile: credentialFileStore},
-				NodeName:         "test_node",
-				FileSystem:       fakeFS,
-				Log:              velerotest.NewLogger(),
+				clock:            testclocks.NewFakeClock(now),
+				metrics:          metrics.NewNodeMetrics(),
+				credentialGetter: &credentials.CredentialGetter{FromFile: credentialFileStore},
+				nodeName:         "test_node",
+				fileSystem:       fakeFS,
+				logger:           velerotest.NewLogger(),
+				dataPathMgr:      test.dataMgr,
 			}
-			NewUploaderProviderFunc = func(ctx context.Context, client kbclient.Client, uploaderType, repoIdentifier string, bsl *velerov1api.BackupStorageLocation, backupRepo *velerov1api.BackupRepository, credGetter *credentials.CredentialGetter, repoKeySelector *corev1.SecretKeySelector, log logrus.FieldLogger) (provider.Provider, error) {
-				return &fakeProvider{}, nil
-			}
+
 			actualResult, err := r.Reconcile(ctx, ctrl.Request{
 				NamespacedName: types.NamespacedName{
 					Namespace: velerov1api.DefaultNamespace,
@@ -162,7 +206,7 @@ var _ = Describe("PodVolumeBackup Reconciler", func() {
 			})
 			Expect(actualResult).To(BeEquivalentTo(test.expectedRequeue))
 			if test.expectedErrMsg == "" {
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			} else {
 				Expect(err.Error()).To(BeEquivalentTo(test.expectedErrMsg))
 			}
@@ -176,7 +220,7 @@ var _ = Describe("PodVolumeBackup Reconciler", func() {
 			if test.expected == nil {
 				Expect(apierrors.IsNotFound(err)).To(BeTrue())
 			} else {
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Eventually(pvb.Status.Phase).Should(Equal(test.expected.Status.Phase))
 			}
 
@@ -327,29 +371,17 @@ var _ = Describe("PodVolumeBackup Reconciler", func() {
 				Result(),
 			expectedRequeue: ctrl.Result{},
 		}),
+		Entry("pvb should be requeued when exceeding max concurrent number", request{
+			pvb:               pvbBuilder().Phase("").Node("test_node").Result(),
+			pod:               podBuilder().Result(),
+			bsl:               bslBuilder().Result(),
+			backupRepo:        buildBackupRepo(),
+			dataMgr:           datapath.NewManager(0),
+			expectedProcessed: false,
+			expected: builder.ForPodVolumeBackup(velerov1api.DefaultNamespace, "pvb-1").
+				Phase("").
+				Result(),
+			expectedRequeue: ctrl.Result{Requeue: true, RequeueAfter: time.Second * 5},
+		}),
 	)
 })
-
-type fakeProvider struct {
-}
-
-func (f *fakeProvider) RunBackup(
-	ctx context.Context,
-	path string,
-	tags map[string]string,
-	parentSnapshot string,
-	updater uploader.ProgressUpdater) (string, bool, error) {
-	return "", false, nil
-}
-
-func (f *fakeProvider) RunRestore(
-	ctx context.Context,
-	snapshotID string,
-	volumePath string,
-	updater uploader.ProgressUpdater) error {
-	return nil
-}
-
-func (f *fakeProvider) Close(ctx context.Context) error {
-	return nil
-}

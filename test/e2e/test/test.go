@@ -18,18 +18,19 @@ package test
 
 import (
 	"context"
-	"flag"
 	"fmt"
+	"math/rand/v2"
+	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	"github.com/pkg/errors"
 
-	. "github.com/vmware-tanzu/velero/test/e2e"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/k8s"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/velero"
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	. "github.com/vmware-tanzu/velero/test"
+	. "github.com/vmware-tanzu/velero/test/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/velero"
 )
 
 /*
@@ -40,13 +41,13 @@ depends on your test patterns.
 */
 type VeleroBackupRestoreTest interface {
 	Init() error
-	StartRun() error
 	CreateResources() error
 	Backup() error
 	Destroy() error
 	Restore() error
 	Verify() error
 	Clean() error
+	Start() error
 	GetTestMsg() *TestMSG
 	GetTestCase() *TestCase
 }
@@ -60,125 +61,100 @@ type TestMSG struct {
 type TestCase struct {
 	BackupName         string
 	RestoreName        string
-	NSBaseName         string
+	CaseBaseName       string
 	BackupArgs         []string
 	RestoreArgs        []string
 	NamespacesTotal    int
 	TestMsg            *TestMSG
 	Client             TestClient
-	Ctx                context.Context
 	NSIncluded         *[]string
 	UseVolumeSnapshots bool
+	VeleroCfg          VeleroConfig
+	RestorePhaseExpect velerov1api.RestorePhase
+	Ctx                context.Context
+	CtxCancel          context.CancelFunc
+	UUIDgen            string
 }
-
-var TestClientInstance TestClient
 
 func TestFunc(test VeleroBackupRestoreTest) func() {
 	return func() {
-		By("Create test client instance", func() {
-			TestClientInstance = *VeleroCfg.ClientToInstallVelero
-		})
-		Expect(test.Init()).To(Succeed(), "Failed to instantiate test cases")
-		BeforeEach(func() {
-			flag.Parse()
-			if VeleroCfg.InstallVelero {
-				Expect(VeleroInstall(context.Background(), &VeleroCfg, test.GetTestCase().UseVolumeSnapshots)).To(Succeed())
-			}
-		})
-		AfterEach(func() {
-			if !VeleroCfg.Debug {
-				if VeleroCfg.InstallVelero {
-					Expect(VeleroUninstall(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)).To((Succeed()))
-				}
-			}
-		})
-		It(test.GetTestMsg().Text, func() {
-			Expect(RunTestCase(test)).To(Succeed(), test.GetTestMsg().FailedMSG)
-		})
+		TestIt(test)
 	}
 }
 
 func TestFuncWithMultiIt(tests []VeleroBackupRestoreTest) func() {
 	return func() {
-		var countIt int
-		By("Create test client instance", func() {
-			TestClientInstance = *VeleroCfg.ClientToInstallVelero
-		})
-		var useVolumeSnapshots bool
 		for k := range tests {
-			Expect(tests[k].Init()).To(Succeed(), fmt.Sprintf("Failed to instantiate test %s case", tests[k].GetTestMsg().Desc))
-			useVolumeSnapshots = tests[k].GetTestCase().UseVolumeSnapshots
-		}
-
-		BeforeEach(func() {
-			flag.Parse()
-			if VeleroCfg.InstallVelero {
-				if countIt == 0 {
-					Expect(VeleroInstall(context.Background(), &VeleroCfg, useVolumeSnapshots)).To(Succeed())
-				}
-				countIt++
-			}
-		})
-
-		AfterEach(func() {
-			if !VeleroCfg.Debug {
-				if VeleroCfg.InstallVelero {
-					if countIt == len(tests) && !VeleroCfg.Debug {
-						Expect(VeleroUninstall(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)).To((Succeed()))
-					}
-				}
-			}
-		})
-
-		for k := range tests {
-			curTest := tests[k]
-			It(curTest.GetTestMsg().Text, func() {
-				Expect(RunTestCase(curTest)).To(Succeed(), curTest.GetTestMsg().FailedMSG)
-			})
+			TestIt(tests[k])
 		}
 	}
 }
 
-func (t *TestCase) Init() error {
+func TestIt(test VeleroBackupRestoreTest) error {
+	It("Run E2E test case", func() {
+		Expect(test.Init()).To(Succeed())
+
+		Expect(RunTestCase(test)).To(Succeed(), test.GetTestMsg().FailedMSG)
+	})
 	return nil
+}
+func (t *TestCase) Init() error {
+	t.UUIDgen = t.GenerateUUID()
+	t.VeleroCfg = VeleroCfg
+	t.Client = *t.VeleroCfg.ClientToInstallVelero
+	return nil
+}
+
+func (t *TestCase) GenerateUUID() string {
+	return fmt.Sprintf("%08d", rand.IntN(100000000))
 }
 
 func (t *TestCase) CreateResources() error {
 	return nil
 }
 
-func (t *TestCase) StartRun() error {
-	return nil
-}
-
 func (t *TestCase) Backup() error {
-	if err := VeleroBackupExec(t.Ctx, VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace, t.BackupName, t.BackupArgs); err != nil {
-		RunDebug(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace, t.BackupName, "")
-		return errors.Wrapf(err, "Failed to backup resources")
-	}
+	veleroCfg := t.GetTestCase().VeleroCfg
+
+	By("Start to backup ......", func() {
+		Expect(VeleroBackupExec(t.Ctx, veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace, t.BackupName, t.BackupArgs)).To(Succeed(), func() string {
+			RunDebug(context.Background(), veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace, t.BackupName, "")
+			return "Failed to backup resources"
+		})
+	})
+
 	return nil
 }
 
 func (t *TestCase) Destroy() error {
-	err := CleanupNamespacesWithPoll(t.Ctx, t.Client, t.NSBaseName)
-	if err != nil {
-		return errors.Wrap(err, "Could cleanup retrieve namespaces")
-	}
+	By(fmt.Sprintf("Start to destroy namespace %s......", t.CaseBaseName), func() {
+		Expect(CleanupNamespacesWithPoll(t.Ctx, t.Client, t.CaseBaseName)).To(Succeed(), "Could cleanup retrieve namespaces")
+	})
 	return nil
 }
 
 func (t *TestCase) Restore() error {
+	if len(t.RestoreArgs) == 0 {
+		return nil
+	}
+
+	veleroCfg := t.GetTestCase().VeleroCfg
+
 	// the snapshots of AWS may be still in pending status when do the restore, wait for a while
 	// to avoid this https://github.com/vmware-tanzu/velero/issues/1799
 	// TODO remove this after https://github.com/vmware-tanzu/velero/issues/3533 is fixed
-	if t.UseVolumeSnapshots {
-		fmt.Println("Waiting 5 minutes to make sure the snapshots are ready...")
-		time.Sleep(5 * time.Minute)
-	}
+	By("Waiting 5 minutes to make sure the snapshots are ready...", func() {
+		if t.UseVolumeSnapshots && veleroCfg.CloudProvider != Vsphere {
+			time.Sleep(5 * time.Minute)
+		}
+	})
 
 	By("Start to restore ......", func() {
-		Expect(VeleroRestoreExec(t.Ctx, VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace, t.RestoreName, t.RestoreArgs)).To(Succeed(), func() string {
-			RunDebug(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace, "", t.RestoreName)
+		if t.RestorePhaseExpect == "" {
+			t.RestorePhaseExpect = velerov1api.RestorePhaseCompleted
+		}
+		Expect(VeleroRestoreExec(t.Ctx, veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace, t.RestoreName, t.RestoreArgs, t.RestorePhaseExpect)).To(Succeed(), func() string {
+			RunDebug(context.Background(), veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace, "", t.RestoreName)
 			return "Fail to restore workload"
 		})
 	})
@@ -189,15 +165,40 @@ func (t *TestCase) Verify() error {
 	return nil
 }
 
+func (t *TestCase) Start() error {
+	t.Ctx, t.CtxCancel = context.WithTimeout(context.Background(), 1*time.Hour)
+	veleroCfg := t.GetTestCase().VeleroCfg
+
+	if (veleroCfg.CloudProvider == Azure || veleroCfg.CloudProvider == AWS) &&
+		strings.Contains(t.GetTestCase().CaseBaseName, "nodeport") {
+		Skip("Skip due to issue https://github.com/kubernetes/kubernetes/issues/114384 on AKS")
+	}
+
+	if veleroCfg.UploaderType == UploaderTypeRestic &&
+		strings.Contains(t.GetTestCase().CaseBaseName, "ParallelFiles") {
+		Skip("Skip Parallel Files upload and download test cases for environments using Restic as uploader.")
+	}
+	return nil
+}
+
 func (t *TestCase) Clean() error {
-	if !VeleroCfg.Debug {
-		By(fmt.Sprintf("Clean namespace with prefix %s after test", t.NSBaseName), func() {
-			CleanupNamespaces(t.Ctx, t.Client, t.NSBaseName)
+	veleroCfg := t.GetTestCase().VeleroCfg
+	if CurrentSpecReport().Failed() && veleroCfg.FailFast {
+		fmt.Println("Test case failed and fail fast is enabled. Skip resource clean up.")
+	} else {
+		By(fmt.Sprintf("Clean namespace with prefix %s after test", t.CaseBaseName), func() {
+			if err := CleanupNamespaces(t.Ctx, t.Client, t.CaseBaseName); err != nil {
+				fmt.Println("Fail to cleanup namespaces: ", err)
+			}
 		})
 		By("Clean backups after test", func() {
-			DeleteBackups(t.Ctx, t.Client)
+			veleroCfg.ClientToInstallVelero = &t.Client
+			if err := DeleteAllBackups(t.Ctx, &veleroCfg); err != nil {
+				fmt.Println("Fail to clean backups after test: ", err)
+			}
 		})
 	}
+
 	return nil
 }
 
@@ -208,36 +209,48 @@ func (t *TestCase) GetTestMsg() *TestMSG {
 func (t *TestCase) GetTestCase() *TestCase {
 	return t
 }
+
 func RunTestCase(test VeleroBackupRestoreTest) error {
-	fmt.Printf("Running test case %s\n", test.GetTestMsg().Desc)
 	if test == nil {
 		return errors.New("No case should be tested")
 	}
+	fmt.Println("Running case: ", test.GetTestMsg().Text)
+	test.Start()
+	defer test.GetTestCase().CtxCancel()
+
+	fmt.Printf("Running test case %s %s\n", test.GetTestMsg().Desc, time.Now().Format("2006-01-02 15:04:05"))
+
+	if InstallVelero {
+		Expect(PrepareVelero(context.Background(), test.GetTestCase().CaseBaseName, test.GetTestCase().VeleroCfg)).To(Succeed())
+	}
 
 	defer test.Clean()
-	err := test.StartRun()
+
+	fmt.Printf("CreateResources %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	err := test.CreateResources()
 	if err != nil {
 		return err
 	}
-	err = test.CreateResources()
-	if err != nil {
-		return err
-	}
+	fmt.Printf("Backup %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	err = test.Backup()
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Destroy %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	err = test.Destroy()
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Restore %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	err = test.Restore()
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Verify %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	err = test.Verify()
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Finish run test %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	return nil
 }

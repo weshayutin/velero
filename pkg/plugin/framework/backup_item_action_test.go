@@ -31,7 +31,6 @@ import (
 	v1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework/common"
 	proto "github.com/vmware-tanzu/velero/pkg/plugin/generated"
-	protobiav1 "github.com/vmware-tanzu/velero/pkg/plugin/generated"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	mocks "github.com/vmware-tanzu/velero/pkg/plugin/velero/mocks/backupitemaction/v1"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
@@ -157,12 +156,12 @@ func TestBackupItemActionGRPCServerExecute(t *testing.T) {
 
 			s := &BackupItemActionGRPCServer{mux: &common.ServerMux{
 				ServerLog: velerotest.NewLogger(),
-				Handlers: map[string]interface{}{
+				Handlers: map[string]any{
 					"xyz": itemAction,
 				},
 			}}
 
-			req := &protobiav1.ExecuteRequest{
+			req := &proto.ExecuteRequest{
 				Plugin: "xyz",
 				Item:   test.item,
 				Backup: test.backup,

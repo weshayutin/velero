@@ -19,34 +19,51 @@ package test
 import (
 	"testing"
 
-	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/require"
+	appsv1api "k8s.io/api/apps/v1"
 	corev1api "k8s.io/api/core/v1"
+	storagev1api "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	k8sfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	velerov2alpha1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 )
 
 func NewFakeControllerRuntimeClientBuilder(t *testing.T) *k8sfake.ClientBuilder {
+	t.Helper()
 	scheme := runtime.NewScheme()
-	err := velerov1api.AddToScheme(scheme)
-	require.NoError(t, err)
-	err = corev1api.AddToScheme(scheme)
-	require.NoError(t, err)
-	err = snapshotv1api.AddToScheme(scheme)
-	require.NoError(t, err)
+
+	require.NoError(t, velerov1api.AddToScheme(scheme))
+	require.NoError(t, velerov2alpha1api.AddToScheme(scheme))
+	require.NoError(t, corev1api.AddToScheme(scheme))
+	require.NoError(t, appsv1api.AddToScheme(scheme))
+	require.NoError(t, snapshotv1api.AddToScheme(scheme))
+	require.NoError(t, storagev1api.AddToScheme(scheme))
+
 	return k8sfake.NewClientBuilder().WithScheme(scheme)
 }
 
 func NewFakeControllerRuntimeClient(t *testing.T, initObjs ...runtime.Object) client.Client {
+	t.Helper()
 	scheme := runtime.NewScheme()
-	err := velerov1api.AddToScheme(scheme)
-	require.NoError(t, err)
-	err = corev1api.AddToScheme(scheme)
-	require.NoError(t, err)
-	err = snapshotv1api.AddToScheme(scheme)
-	require.NoError(t, err)
-	return k8sfake.NewFakeClientWithScheme(scheme, initObjs...)
+
+	require.NoError(t, velerov1api.AddToScheme(scheme))
+	require.NoError(t, velerov2alpha1api.AddToScheme(scheme))
+	require.NoError(t, corev1api.AddToScheme(scheme))
+	require.NoError(t, appsv1api.AddToScheme(scheme))
+	require.NoError(t, snapshotv1api.AddToScheme(scheme))
+	require.NoError(t, storagev1api.AddToScheme(scheme))
+
+	return k8sfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(initObjs...).Build()
+}
+
+func NewFakeControllerRuntimeWatchClient(
+	t *testing.T,
+	initObjs ...runtime.Object,
+) client.WithWatch {
+	t.Helper()
+	return NewFakeControllerRuntimeClientBuilder(t).WithRuntimeObjects(initObjs...).Build()
 }

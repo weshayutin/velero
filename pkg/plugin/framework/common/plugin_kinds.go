@@ -41,20 +41,20 @@ const (
 	// PluginKindRestoreItemAction represents a restore item action plugin.
 	PluginKindRestoreItemAction PluginKind = "RestoreItemAction"
 
-	// PluginKindRestoreItemAction represents a v2 restore item action plugin.
+	// PluginKindRestoreItemActionV2 represents a v2 restore item action plugin.
 	PluginKindRestoreItemActionV2 PluginKind = "RestoreItemActionV2"
 
 	// PluginKindDeleteItemAction represents a delete item action plugin.
 	PluginKindDeleteItemAction PluginKind = "DeleteItemAction"
 
-	// PluginKindItemSnapshotter represents an item snapshotter plugin
-	PluginKindItemSnapshotter PluginKind = "ItemSnapshotter"
+	// PluginKindItemBlockAction represents a v1 ItemBlock action plugin.
+	PluginKindItemBlockAction PluginKind = "ItemBlockAction"
 
 	// PluginKindPluginLister represents a plugin lister plugin.
 	PluginKindPluginLister PluginKind = "PluginLister"
 )
 
-// If there are plugin kinds that are adaptable to newer API versions, list them here.
+// PluginKindsAdaptableTo if there are plugin kinds that are adaptable to newer API versions, list them here.
 // The older (adaptable) version is the key, and the value is the full list of newer
 // plugin kinds that are capable of adapting it.
 var PluginKindsAdaptableTo = map[PluginKind][]PluginKind{
@@ -73,6 +73,6 @@ func AllPluginKinds() map[string]PluginKind {
 	allPluginKinds[PluginKindRestoreItemAction.String()] = PluginKindRestoreItemAction
 	allPluginKinds[PluginKindRestoreItemActionV2.String()] = PluginKindRestoreItemActionV2
 	allPluginKinds[PluginKindDeleteItemAction.String()] = PluginKindDeleteItemAction
-	allPluginKinds[PluginKindItemSnapshotter.String()] = PluginKindItemSnapshotter
+	allPluginKinds[PluginKindItemBlockAction.String()] = PluginKindItemBlockAction
 	return allPluginKinds
 }

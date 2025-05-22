@@ -18,72 +18,51 @@ package podvolume
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
-	clientset "github.com/vmware-tanzu/velero/pkg/generated/clientset/versioned"
-	velerov1informers "github.com/vmware-tanzu/velero/pkg/generated/informers/externalversions/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/repository"
 )
 
 // BackupperFactory can construct pod volumes backuppers.
 type BackupperFactory interface {
 	// NewBackupper returns a pod volumes backupper for use during a single Velero backup.
-	NewBackupper(context.Context, *velerov1api.Backup, string) (Backupper, error)
+	NewBackupper(context.Context, logrus.FieldLogger, *velerov1api.Backup, string) (Backupper, error)
 }
 
-func NewBackupperFactory(repoLocker *repository.RepoLocker,
-	repoEnsurer *repository.RepositoryEnsurer,
-	veleroClient clientset.Interface,
-	pvcClient corev1client.PersistentVolumeClaimsGetter,
-	pvClient corev1client.PersistentVolumesGetter,
-	podClient corev1client.PodsGetter,
-	repoInformerSynced cache.InformerSynced,
-	log logrus.FieldLogger) BackupperFactory {
+func NewBackupperFactory(
+	repoLocker *repository.RepoLocker,
+	repoEnsurer *repository.Ensurer,
+	crClient ctrlclient.Client,
+	pvbInformer ctrlcache.Informer,
+	log logrus.FieldLogger,
+) BackupperFactory {
 	return &backupperFactory{
-		repoLocker:         repoLocker,
-		repoEnsurer:        repoEnsurer,
-		veleroClient:       veleroClient,
-		pvcClient:          pvcClient,
-		pvClient:           pvClient,
-		podClient:          podClient,
-		repoInformerSynced: repoInformerSynced,
-		log:                log,
+		repoLocker:  repoLocker,
+		repoEnsurer: repoEnsurer,
+		crClient:    crClient,
+		pvbInformer: pvbInformer,
+		log:         log,
 	}
 }
 
 type backupperFactory struct {
-	repoLocker         *repository.RepoLocker
-	repoEnsurer        *repository.RepositoryEnsurer
-	veleroClient       clientset.Interface
-	pvcClient          corev1client.PersistentVolumeClaimsGetter
-	pvClient           corev1client.PersistentVolumesGetter
-	podClient          corev1client.PodsGetter
-	repoInformerSynced cache.InformerSynced
-	log                logrus.FieldLogger
+	repoLocker  *repository.RepoLocker
+	repoEnsurer *repository.Ensurer
+	crClient    ctrlclient.Client
+	pvbInformer ctrlcache.Informer
+	log         logrus.FieldLogger
 }
 
-func (bf *backupperFactory) NewBackupper(ctx context.Context, backup *velerov1api.Backup, uploaderType string) (Backupper, error) {
-	informer := velerov1informers.NewFilteredPodVolumeBackupInformer(
-		bf.veleroClient,
-		backup.Namespace,
-		0,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		func(opts *metav1.ListOptions) {
-			opts.LabelSelector = fmt.Sprintf("%s=%s", velerov1api.BackupUIDLabel, backup.UID)
-		},
-	)
+func (bf *backupperFactory) NewBackupper(ctx context.Context, log logrus.FieldLogger, backup *velerov1api.Backup, uploaderType string) (Backupper, error) {
+	b := newBackupper(ctx, log, bf.repoLocker, bf.repoEnsurer, bf.pvbInformer, bf.crClient, uploaderType, backup)
 
-	b := newBackupper(ctx, bf.repoLocker, bf.repoEnsurer, informer, bf.veleroClient, bf.pvcClient, bf.pvClient, bf.podClient, uploaderType, bf.log)
-
-	go informer.Run(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced, bf.repoInformerSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), bf.pvbInformer.HasSynced) {
 		return nil, errors.New("timed out waiting for caches to sync")
 	}
 

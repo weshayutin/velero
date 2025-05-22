@@ -23,7 +23,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/clock"
+	clocks "k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,6 +32,8 @@ import (
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	pkgbackup "github.com/vmware-tanzu/velero/pkg/backup"
+	veleroclient "github.com/vmware-tanzu/velero/pkg/client"
+	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
 )
@@ -48,7 +50,7 @@ const (
 type gcReconciler struct {
 	client.Client
 	logger    logrus.FieldLogger
-	clock     clock.Clock
+	clock     clocks.WithTickerAndDelayedExecution
 	frequency time.Duration
 }
 
@@ -61,7 +63,7 @@ func NewGCReconciler(
 	gcr := &gcReconciler{
 		Client:    client,
 		logger:    logger,
-		clock:     clock.RealClock{},
+		clock:     clocks.RealClock{},
 		frequency: frequency,
 	}
 	if gcr.frequency <= 0 {
@@ -74,7 +76,7 @@ func NewGCReconciler(
 // Other Events will be filtered to decrease the number of reconcile call. Especially UpdateEvent must be filtered since we removed
 // the backup status as the sub-resource of backup in v1.9, every change on it will be treated as UpdateEvent and trigger reconcile call.
 func (c *gcReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	s := kube.NewPeriodicalEnqueueSource(c.logger, mgr.GetClient(), &velerov1api.BackupList{}, c.frequency, kube.PeriodicalEnqueueSourceOption{})
+	s := kube.NewPeriodicalEnqueueSource(c.logger.WithField("controller", constant.ControllerGarbageCollection), mgr.GetClient(), &velerov1api.BackupList{}, c.frequency, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.Backup{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: func(ue event.UpdateEvent) bool {
@@ -87,7 +89,8 @@ func (c *gcReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return false
 			},
 		})).
-		Watches(s, nil).
+		WatchesRawSource(s).
+		Named(constant.ControllerGarbageCollection).
 		Complete(c)
 }
 
@@ -96,6 +99,7 @@ func (c *gcReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // +kubebuilder:rbac:groups=velero.io,resources=deletebackuprequests,verbs=get;list;watch;create;
 // +kubebuilder:rbac:groups=velero.io,resources=deletebackuprequests/status,verbs=get
 // +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations,verbs=get
+
 func (c *gcReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := c.logger.WithField("gc backup", req.String())
 	log.Debug("gcController getting backup")
@@ -186,7 +190,7 @@ func (c *gcReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 	log.Info("Creating a new deletion request")
 	ndbr := pkgbackup.NewDeleteBackupRequest(backup.Name, string(backup.UID))
 	ndbr.SetNamespace(backup.Namespace)
-	if err := c.Create(ctx, ndbr); err != nil {
+	if err := veleroclient.CreateRetryGenerateName(c, ctx, ndbr); err != nil {
 		log.WithError(err).Error("error creating DeleteBackupRequests")
 		return ctrl.Result{}, errors.Wrap(err, "error creating DeleteBackupRequest")
 	}

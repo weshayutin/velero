@@ -40,6 +40,7 @@ type TarWriter struct {
 }
 
 func NewTarWriter(t *testing.T) *TarWriter {
+	t.Helper()
 	tw := new(TarWriter)
 	tw.t = t
 	tw.buf = new(bytes.Buffer)
@@ -53,7 +54,6 @@ func (tw *TarWriter) AddItems(groupResource string, items ...metav1.Object) *Tar
 	tw.t.Helper()
 
 	for _, obj := range items {
-
 		var path string
 		if obj.GetNamespace() == "" {
 			path = fmt.Sprintf("resources/%s/cluster/%s.json", groupResource, obj.GetName())
@@ -67,17 +67,17 @@ func (tw *TarWriter) AddItems(groupResource string, items ...metav1.Object) *Tar
 	return tw
 }
 
-func (tw *TarWriter) Add(name string, obj interface{}) *TarWriter {
+func (tw *TarWriter) Add(name string, obj any) *TarWriter {
 	tw.t.Helper()
 
 	var data []byte
 	var err error
 
-	switch obj.(type) {
+	switch objType := obj.(type) {
 	case runtime.Object:
-		data, err = encode.Encode(obj.(runtime.Object), "json")
+		data, err = encode.Encode(objType, "json")
 	case []byte:
-		data = obj.([]byte)
+		data = objType
 	default:
 		data, err = json.Marshal(obj)
 	}

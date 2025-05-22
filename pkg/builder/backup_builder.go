@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"time"
 
+	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/vmware-tanzu/velero/internal/resourcepolicies"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 
 	"github.com/sirupsen/logrus"
@@ -81,7 +83,7 @@ func (b *BackupBuilder) ObjectMeta(opts ...ObjectMetaOpt) *BackupBuilder {
 
 // FromSchedule sets the Backup's spec and labels from the Schedule template
 func (b *BackupBuilder) FromSchedule(schedule *velerov1api.Schedule) *BackupBuilder {
-	var labels = make(map[string]string)
+	var labels map[string]string
 
 	// Check if there's explicit Labels defined in the Schedule object template
 	// and if present then copy it to the backup object.
@@ -123,6 +125,10 @@ func (b *BackupBuilder) FromSchedule(schedule *velerov1api.Schedule) *BackupBuil
 		})
 	}
 
+	if schedule.Spec.Template.ResourcePolicy != nil {
+		b.ResourcePolicies(schedule.Spec.Template.ResourcePolicy.Name)
+	}
+
 	return b
 }
 
@@ -147,6 +153,30 @@ func (b *BackupBuilder) IncludedResources(resources ...string) *BackupBuilder {
 // ExcludedResources sets the Backup's excluded resources.
 func (b *BackupBuilder) ExcludedResources(resources ...string) *BackupBuilder {
 	b.object.Spec.ExcludedResources = resources
+	return b
+}
+
+// IncludedClusterScopedResources sets the Backup's included cluster resources.
+func (b *BackupBuilder) IncludedClusterScopedResources(resources ...string) *BackupBuilder {
+	b.object.Spec.IncludedClusterScopedResources = resources
+	return b
+}
+
+// ExcludedClusterScopedResources sets the Backup's excluded cluster resources.
+func (b *BackupBuilder) ExcludedClusterScopedResources(resources ...string) *BackupBuilder {
+	b.object.Spec.ExcludedClusterScopedResources = resources
+	return b
+}
+
+// IncludedNamespaceScopedResources sets the Backup's included namespaced resources.
+func (b *BackupBuilder) IncludedNamespaceScopedResources(resources ...string) *BackupBuilder {
+	b.object.Spec.IncludedNamespaceScopedResources = resources
+	return b
+}
+
+// ExcludedNamespaceScopedResources sets the Backup's excluded namespaced resources.
+func (b *BackupBuilder) ExcludedNamespaceScopedResources(resources ...string) *BackupBuilder {
+	b.object.Spec.ExcludedNamespaceScopedResources = resources
 	return b
 }
 
@@ -243,5 +273,44 @@ func (b *BackupBuilder) OrderedResources(orders map[string]string) *BackupBuilde
 // CSISnapshotTimeout sets the Backup's CSISnapshotTimeout
 func (b *BackupBuilder) CSISnapshotTimeout(timeout time.Duration) *BackupBuilder {
 	b.object.Spec.CSISnapshotTimeout.Duration = timeout
+	return b
+}
+
+// ItemOperationTimeout sets the Backup's ItemOperationTimeout
+func (b *BackupBuilder) ItemOperationTimeout(timeout time.Duration) *BackupBuilder {
+	b.object.Spec.ItemOperationTimeout.Duration = timeout
+	return b
+}
+
+// ResourcePolicies sets the Backup's resource polices.
+func (b *BackupBuilder) ResourcePolicies(name string) *BackupBuilder {
+	b.object.Spec.ResourcePolicy = &corev1api.TypedLocalObjectReference{Kind: resourcepolicies.ConfigmapRefType, Name: name}
+	return b
+}
+
+// SnapshotMoveData sets the Backup's "snapshot move data" flag.
+func (b *BackupBuilder) SnapshotMoveData(val bool) *BackupBuilder {
+	b.object.Spec.SnapshotMoveData = &val
+	return b
+}
+
+// DataMover sets the Backup's data mover
+func (b *BackupBuilder) DataMover(name string) *BackupBuilder {
+	b.object.Spec.DataMover = name
+	return b
+}
+
+// ParallelFilesUpload sets the Backup's uploader parallel uploads
+func (b *BackupBuilder) ParallelFilesUpload(parallel int) *BackupBuilder {
+	if b.object.Spec.UploaderConfig == nil {
+		b.object.Spec.UploaderConfig = &velerov1api.UploaderConfigForBackup{}
+	}
+	b.object.Spec.UploaderConfig.ParallelFilesUpload = parallel
+	return b
+}
+
+// WithStatus sets the Backup's status.
+func (b *BackupBuilder) WithStatus(status velerov1api.BackupStatus) *BackupBuilder {
+	b.object.Status = status
 	return b
 }

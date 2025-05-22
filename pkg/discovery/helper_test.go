@@ -18,13 +18,20 @@ package discovery
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/version"
+	"k8s.io/client-go/discovery/fake"
+	clientgotesting "k8s.io/client-go/testing"
 
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/features"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 )
@@ -188,14 +195,460 @@ func TestRefreshServerPreferredResources(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			resources, err := refreshServerPreferredResources(fakeServer, logging.DefaultLogger(logrus.DebugLevel, formatFlag))
 			if test.returnError != nil {
-				assert.NotNil(t, err)
+				assert.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				assert.NoError(t, err)
 				assert.Equal(t, test.returnError, err)
 			}
 
 			assert.Equal(t, test.resourceList, resources)
 		})
 	}
+}
 
+func TestHelper_ResourceFor(t *testing.T) {
+	fakeDiscoveryClient := &fake.FakeDiscovery{
+		Fake: &clientgotesting.Fake{},
+	}
+	fakeDiscoveryClient.Resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{
+					Name:    "pods",
+					Kind:    "Pod",
+					Group:   "",
+					Version: "v1",
+					Verbs:   []string{"create", "get", "list"},
+				},
+			},
+		},
+	}
+	h := &helper{
+		discoveryClient: &velerotest.DiscoveryClient{
+			FakeDiscovery: fakeDiscoveryClient,
+		},
+		lock:          sync.RWMutex{},
+		mapper:        nil,
+		resources:     fakeDiscoveryClient.Resources,
+		resourcesMap:  make(map[schema.GroupVersionResource]metav1.APIResource),
+		serverVersion: &version.Info{Major: "1", Minor: "22", GitVersion: "v1.22.1"},
+	}
+
+	for _, resourceList := range h.resources {
+		for _, resource := range resourceList.APIResources {
+			gvr := schema.GroupVersionResource{
+				Group:    resource.Group,
+				Version:  resource.Version,
+				Resource: resource.Name,
+			}
+			h.resourcesMap[gvr] = resource
+		}
+	}
+	pvGVR := schema.GroupVersionResource{
+		Group:    "",
+		Version:  "v1",
+		Resource: "pods",
+	}
+	h.mapper = &velerotest.FakeMapper{Resources: map[schema.GroupVersionResource]schema.GroupVersionResource{pvGVR: pvGVR}}
+
+	tests := []struct {
+		name                string
+		err                 string
+		input               *schema.GroupVersionResource
+		isNotFoundRes       bool
+		expectedGVR         *schema.GroupVersionResource
+		expectedAPIResource *metav1.APIResource
+	}{
+		{
+			name: "Found resource",
+			input: &schema.GroupVersionResource{
+				Group:    "",
+				Version:  "v1",
+				Resource: "pods",
+			},
+			expectedAPIResource: &metav1.APIResource{
+				Name:    "pods",
+				Kind:    "Pod",
+				Group:   "",
+				Version: "v1",
+				Verbs:   []string{"create", "get", "list"},
+			},
+			expectedGVR: &schema.GroupVersionResource{
+				Group:    "",
+				Version:  "v1",
+				Resource: "pods",
+			},
+		},
+		{
+			name: "Error to found resource",
+			input: &schema.GroupVersionResource{
+				Group:    "",
+				Version:  "v2",
+				Resource: "pods",
+			},
+			err:                 "invalid resource",
+			expectedGVR:         &schema.GroupVersionResource{},
+			expectedAPIResource: &metav1.APIResource{},
+		},
+		{
+			name: "Error to found api resource",
+			input: &schema.GroupVersionResource{
+				Group:    "",
+				Version:  "v1",
+				Resource: "pods",
+			},
+			isNotFoundRes:       true,
+			err:                 "APIResource not found for GroupVersionResource",
+			expectedGVR:         &schema.GroupVersionResource{},
+			expectedAPIResource: &metav1.APIResource{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.isNotFoundRes {
+				h.resourcesMap = nil
+			}
+			gvr, apiResource, err := h.ResourceFor(*tc.input)
+			if tc.err == "" {
+				assert.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.err)
+			}
+			assert.Equal(t, *tc.expectedGVR, gvr)
+			assert.Equal(t, *tc.expectedAPIResource, apiResource)
+		})
+	}
+}
+
+func TestHelper_KindFor(t *testing.T) {
+	fakeDiscoveryClient := &fake.FakeDiscovery{
+		Fake: &clientgotesting.Fake{},
+	}
+	fakeDiscoveryClient.Resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{
+					Name:    "pods",
+					Kind:    "Pod",
+					Group:   "",
+					Version: "v1",
+					Verbs:   []string{"create", "get", "list"},
+				},
+			},
+		},
+	}
+	pvGVK := schema.GroupVersionKind{
+		Group:   "",
+		Version: "v1",
+		Kind:    "Deployment",
+	}
+	pvAPIRes := metav1.APIResource{
+		Name:    "deployments",
+		Kind:    "Deployment",
+		Group:   "apps",
+		Version: "v1",
+		Verbs:   []string{"create", "get", "list"},
+	}
+
+	h := &helper{
+		discoveryClient: &velerotest.DiscoveryClient{
+			FakeDiscovery: fakeDiscoveryClient,
+		},
+		lock:          sync.RWMutex{},
+		resources:     fakeDiscoveryClient.Resources,
+		resourcesMap:  make(map[schema.GroupVersionResource]metav1.APIResource),
+		serverVersion: &version.Info{Major: "1", Minor: "22", GitVersion: "v1.22.1"},
+	}
+
+	h.kindMap = map[schema.GroupVersionKind]metav1.APIResource{pvGVK: pvAPIRes}
+	h.mapper = &velerotest.FakeMapper{KindToPluralResource: map[schema.GroupVersionKind]schema.GroupVersionResource{}}
+	for _, resourceList := range h.resources {
+		for _, resource := range resourceList.APIResources {
+			gvr := schema.GroupVersionResource{
+				Group:    resource.Group,
+				Version:  resource.Version,
+				Resource: resource.Name,
+			}
+			h.resourcesMap[gvr] = resource
+		}
+	}
+
+	tests := []struct {
+		name                string
+		err                 string
+		input               *schema.GroupVersionKind
+		isNotFoundRes       bool
+		expectedGVR         *schema.GroupVersionResource
+		expectedAPIResource *metav1.APIResource
+	}{
+		{
+			name: "Found resource",
+			input: &schema.GroupVersionKind{
+				Group:   "",
+				Version: "v1",
+				Kind:    "Deployment",
+			},
+			expectedAPIResource: &metav1.APIResource{
+				Name:    "deployments",
+				Kind:    "Deployment",
+				Group:   "apps",
+				Version: "v1",
+				Verbs:   []string{"create", "get", "list"},
+			},
+			expectedGVR: &schema.GroupVersionResource{
+				Group:    "apps",
+				Version:  "v1",
+				Resource: "deployments",
+			},
+		}, {
+			name: "Not found resource",
+			input: &schema.GroupVersionKind{
+				Group:   "",
+				Version: "v2",
+				Kind:    "Deployment",
+			},
+			expectedAPIResource: &metav1.APIResource{},
+			expectedGVR:         &schema.GroupVersionResource{},
+			err:                 "no matches for kind",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gvr, apiResource, err := h.KindFor(*tc.input)
+			if tc.err == "" {
+				assert.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.err)
+			}
+			assert.Equal(t, *tc.expectedGVR, gvr)
+			assert.Equal(t, *tc.expectedAPIResource, apiResource)
+		})
+	}
+}
+
+func TestHelper_Refresh(t *testing.T) {
+	testCases := []struct {
+		description      string
+		features         string
+		groupResources   []*metav1.APIResourceList
+		serverGroups     []*metav1.APIGroup
+		expectedErr      error
+		expectedResource metav1.APIResource
+	}{
+		{
+			description: "Default case - Resource found",
+			groupResources: []*metav1.APIResourceList{
+				{
+					GroupVersion: "v1",
+					APIResources: []metav1.APIResource{
+						{
+							Name:    "pods",
+							Kind:    "Pod",
+							Group:   "",
+							Version: "v1",
+							Verbs:   []string{"get", "list", "create"},
+						},
+					},
+				},
+			},
+			serverGroups: []*metav1.APIGroup{
+				{
+					Name: "group1",
+					Versions: []metav1.GroupVersionForDiscovery{
+						{
+							GroupVersion: "v1",
+							Version:      "v1",
+						},
+					},
+				},
+			},
+			expectedErr: nil,
+			expectedResource: metav1.APIResource{
+				Name:    "pods",
+				Kind:    "Pod",
+				Group:   "",
+				Version: "v1",
+				Verbs:   []string{"get", "list", "create"},
+			},
+		},
+		{
+			description:    "Feature flag enabled - ServerGroupsAndResources",
+			features:       velerov1api.APIGroupVersionsFeatureFlag,
+			groupResources: []*metav1.APIResourceList{},
+			serverGroups: []*metav1.APIGroup{
+				{
+					Name: "group1",
+					Versions: []metav1.GroupVersionForDiscovery{
+						{
+							GroupVersion: "v1",
+							Version:      "v1",
+						},
+					},
+				},
+			},
+			expectedErr: nil,
+			expectedResource: metav1.APIResource{
+				Name:    "pods",
+				Kind:    "Pod",
+				Group:   "",
+				Version: "v1",
+				Verbs:   []string{"get", "list", "create"},
+			},
+		},
+	}
+
+	fakeDiscoveryClient := &fake.FakeDiscovery{
+		Fake: &clientgotesting.Fake{},
+	}
+	fakeDiscoveryClient.Resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{
+					Name:    "pods",
+					Kind:    "Pod",
+					Group:   "",
+					Version: "v1",
+					Verbs:   []string{"create", "get", "list"},
+				},
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.description, func(t *testing.T) {
+			h := &helper{
+				lock: sync.RWMutex{},
+				discoveryClient: &velerotest.DiscoveryClient{
+					FakeDiscovery: fakeDiscoveryClient,
+				},
+				logger: logrus.New(),
+			}
+			// Set feature flags
+			if testCase.features != "" {
+				features.Enable(testCase.features)
+			}
+			err := h.Refresh()
+			assert.Equal(t, testCase.expectedErr, err)
+		})
+	}
+}
+
+func TestHelper_refreshServerPreferredResources(t *testing.T) {
+	apiList := []*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{
+					Name:    "pods",
+					Kind:    "Pod",
+					Group:   "",
+					Version: "v1",
+					Verbs:   []string{"create", "get", "list"},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		expectedErr error
+	}{
+		{
+			name:        "success get preferred resources",
+			expectedErr: nil,
+		},
+		{
+			name:        "failed to get preferred resources",
+			expectedErr: errors.New("Failed to discover preferred resources"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeClient := velerotest.NewFakeServerResourcesInterface(apiList, []*metav1.APIGroup{}, map[schema.GroupVersion]error{}, tc.expectedErr)
+
+			resources, err := refreshServerPreferredResources(fakeClient, logrus.New())
+
+			if tc.expectedErr != nil {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, resources)
+			}
+		})
+	}
+}
+
+func TestHelper_refreshServerGroupsAndResources(t *testing.T) {
+	apiList := []*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{
+					Name:    "pods",
+					Kind:    "Pod",
+					Group:   "",
+					Version: "v1",
+					Verbs:   []string{"create", "get", "list"},
+				},
+			},
+		},
+	}
+	apiGroup := []*metav1.APIGroup{
+		{
+			Name: "group1",
+			Versions: []metav1.GroupVersionForDiscovery{
+				{
+					GroupVersion: "v1",
+					Version:      "v1",
+				},
+			},
+		},
+	}
+	tests := []struct {
+		name        string
+		expectedErr error
+	}{
+		{
+			name: "success get service groups and resouorces",
+		},
+		{
+			name:        "failed to service groups and resouorces",
+			expectedErr: errors.New("Failed to discover service groups and resouorces"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeClient := velerotest.NewFakeServerResourcesInterface(apiList, apiGroup, map[schema.GroupVersion]error{}, tc.expectedErr)
+
+			serverGroups, serverResources, err := refreshServerGroupsAndResources(fakeClient, logrus.New())
+
+			if tc.expectedErr != nil {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, serverGroups)
+				assert.NotNil(t, serverResources)
+			}
+		})
+	}
+}
+
+func TestHelper(t *testing.T) {
+	fakeDiscoveryClient := &fake.FakeDiscovery{
+		Fake: &clientgotesting.Fake{},
+	}
+	h, err := NewHelper(&velerotest.DiscoveryClient{
+		FakeDiscovery: fakeDiscoveryClient,
+	}, logrus.New())
+	assert.NoError(t, err)
+	// All below calls put together for the implementation are empty or just very simple, and just want to cover testing
+	// If wanting to write unit tests for some functions could remove it and with writing new function alone
+	h.Resources()
+	h.APIGroups()
+	h.ServerVersion()
 }

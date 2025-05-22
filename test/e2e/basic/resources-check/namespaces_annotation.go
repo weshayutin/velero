@@ -17,18 +17,13 @@ limitations under the License.
 package basic
 
 import (
-	"context"
 	"fmt"
-	"math/rand"
 	"strings"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/pkg/errors"
 
-	. "github.com/vmware-tanzu/velero/test/e2e"
 	. "github.com/vmware-tanzu/velero/test/e2e/test"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
 
 type NSAnnotationCase struct {
@@ -36,16 +31,15 @@ type NSAnnotationCase struct {
 }
 
 func (n *NSAnnotationCase) Init() error {
-	rand.Seed(time.Now().UnixNano())
-	UUIDgen, _ = uuid.NewRandom()
-	n.BackupName = "backup-namespace-annotations" + UUIDgen.String()
-	n.RestoreName = "restore-namespace-annotations" + UUIDgen.String()
-	n.NSBaseName = "namespace-annotations-" + UUIDgen.String()
+	n.TestCase.Init()
+	n.CaseBaseName = "namespace-annotations-" + n.UUIDgen
+	n.BackupName = "backup-" + n.CaseBaseName
+	n.RestoreName = "restore-" + n.CaseBaseName
+
 	n.NamespacesTotal = 1
 	n.NSIncluded = &[]string{}
-	n.Client = TestClientInstance
 	for nsNum := 0; nsNum < n.NamespacesTotal; nsNum++ {
-		createNSName := fmt.Sprintf("%s-%00000d", n.NSBaseName, nsNum)
+		createNSName := fmt.Sprintf("%s-%00000d", n.CaseBaseName, nsNum)
 		*n.NSIncluded = append(*n.NSIncluded, createNSName)
 	}
 	n.TestMsg = &TestMSG{
@@ -54,23 +48,22 @@ func (n *NSAnnotationCase) Init() error {
 		FailedMSG: "Failed to successfully backup and restore multiple namespaces",
 	}
 	n.BackupArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "backup", n.BackupName,
+		"create", "--namespace", n.VeleroCfg.VeleroNamespace, "backup", n.BackupName,
 		"--include-namespaces", strings.Join(*n.NSIncluded, ","),
 		"--default-volumes-to-fs-backup", "--wait",
 	}
 
 	n.RestoreArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "restore", n.RestoreName,
+		"create", "--namespace", n.VeleroCfg.VeleroNamespace, "restore", n.RestoreName,
 		"--from-backup", n.BackupName, "--wait",
 	}
 	return nil
 }
 
 func (n *NSAnnotationCase) CreateResources() error {
-	n.Ctx, _ = context.WithTimeout(context.Background(), 10*time.Minute)
 	for nsNum := 0; nsNum < n.NamespacesTotal; nsNum++ {
-		createNSName := fmt.Sprintf("%s-%00000d", n.NSBaseName, nsNum)
-		createAnnotationName := fmt.Sprintf("annotation-%s-%00000d", n.NSBaseName, nsNum)
+		createNSName := fmt.Sprintf("%s-%00000d", n.CaseBaseName, nsNum)
+		createAnnotationName := fmt.Sprintf("annotation-%s-%00000d", n.CaseBaseName, nsNum)
 		if err := CreateNamespaceWithAnnotation(n.Ctx, n.Client, createNSName, map[string]string{"testAnnotation": createAnnotationName}); err != nil {
 			return errors.Wrapf(err, "Failed to create namespace %s", createNSName)
 		}
@@ -80,8 +73,8 @@ func (n *NSAnnotationCase) CreateResources() error {
 
 func (n *NSAnnotationCase) Verify() error {
 	for nsNum := 0; nsNum < n.NamespacesTotal; nsNum++ {
-		checkNSName := fmt.Sprintf("%s-%00000d", n.NSBaseName, nsNum)
-		checkAnnoName := fmt.Sprintf("annotation-%s-%00000d", n.NSBaseName, nsNum)
+		checkNSName := fmt.Sprintf("%s-%00000d", n.CaseBaseName, nsNum)
+		checkAnnoName := fmt.Sprintf("annotation-%s-%00000d", n.CaseBaseName, nsNum)
 		checkNS, err := GetNamespace(n.Ctx, n.Client, checkNSName)
 
 		if err != nil {

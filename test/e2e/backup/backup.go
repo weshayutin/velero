@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,52 +19,98 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	. "github.com/vmware-tanzu/velero/test/e2e"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/k8s"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/kibishii"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/velero"
+	. "github.com/vmware-tanzu/velero/test"
+	. "github.com/vmware-tanzu/velero/test/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/kibishii"
+	. "github.com/vmware-tanzu/velero/test/util/velero"
 )
 
+type BackupRestoreTestConfig struct {
+	useVolumeSnapshots  bool
+	kibishiiPatchSubDir string
+	isRetainPVTest      bool
+}
+
 func BackupRestoreWithSnapshots() {
-	BackupRestoreTest(true)
+	config := BackupRestoreTestConfig{true, "", false}
+	BackupRestoreTest(config)
 }
 
 func BackupRestoreWithRestic() {
-	BackupRestoreTest(false)
+	config := BackupRestoreTestConfig{false, "", false}
+	BackupRestoreTest(config)
 }
 
-func BackupRestoreTest(useVolumeSnapshots bool) {
-	kibishiiNamespace := "kibishii-workload"
+func BackupRestoreRetainedPVWithSnapshots() {
+	config := BackupRestoreTestConfig{true, "overlays/sc-reclaim-policy/", true}
+	BackupRestoreTest(config)
+}
+
+func BackupRestoreRetainedPVWithRestic() {
+	config := BackupRestoreTestConfig{false, "overlays/sc-reclaim-policy/", true}
+	BackupRestoreTest(config)
+}
+
+func BackupRestoreTest(backupRestoreTestConfig BackupRestoreTestConfig) {
 	var (
-		backupName, restoreName string
-		err                     error
+		backupName, restoreName, kibishiiNamespace string
+		err                                        error
+		provideSnapshotVolumesParmInBackup         bool
+		veleroCfg                                  VeleroConfig
 	)
+	provideSnapshotVolumesParmInBackup = false
+	useVolumeSnapshots := backupRestoreTestConfig.useVolumeSnapshots
 
 	BeforeEach(func() {
-		if useVolumeSnapshots && VeleroCfg.CloudProvider == "kind" {
-			Skip("Volume snapshots not supported on kind")
+		veleroCfg = VeleroCfg
+
+		veleroCfg.KibishiiDirectory = veleroCfg.KibishiiDirectory + backupRestoreTestConfig.kibishiiPatchSubDir
+		veleroCfg.UseVolumeSnapshots = useVolumeSnapshots
+		veleroCfg.UseNodeAgent = !useVolumeSnapshots
+		if veleroCfg.CloudProvider == Kind {
+			Skip("Volume snapshots plugin and File System Backups are not supported on kind")
+			// on kind cluster snapshots are not supported since there is no velero snapshot plugin for kind volumes.
+			// and PodVolumeBackups are not supported because PVB creation gets skipped for hostpath volumes, which are the only
+			// volumes created on kind clusters using the default storage class and provisioner (provisioner: rancher.io/local-path)
+			// This test suite checks for volume snapshots and PVBs generated from FileSystemBackups, so skip it on kind clusters
+		}
+
+		// [SKIP]: Static provisioning for vSphere CSI driver works differently from other drivers.
+		//         For vSphere CSI, after you create a PV specifying an existing volume handle, CSI
+		//         syncer will need to register it with CNS. For other CSI drivers, static provisioning
+		//         usually does not go through storage system at all.  That's probably why it took longer
+		if backupRestoreTestConfig.isRetainPVTest && veleroCfg.CloudProvider == Vsphere {
+			Skip("Skip due to vSphere CSI driver long time issue of Static provisioning")
 		}
 		var err error
 		flag.Parse()
 		UUIDgen, err = uuid.NewRandom()
+		kibishiiNamespace = "k-" + UUIDgen.String()
 		Expect(err).To(Succeed())
-		if VeleroCfg.InstallVelero {
-			Expect(VeleroInstall(context.Background(), &VeleroCfg, useVolumeSnapshots)).To(Succeed())
-		}
+		DeleteStorageClass(context.Background(), *veleroCfg.ClientToInstallVelero, KibishiiStorageClassName)
 	})
 
 	AfterEach(func() {
-		if !VeleroCfg.Debug {
+		if CurrentSpecReport().Failed() && veleroCfg.FailFast {
+			fmt.Println("Test case failed and fail fast is enabled. Skip resource clean up.")
+		} else {
 			By("Clean backups after test", func() {
-				DeleteBackups(context.Background(), *VeleroCfg.ClientToInstallVelero)
+				DeleteAllBackups(context.Background(), &veleroCfg)
+				if backupRestoreTestConfig.isRetainPVTest {
+					CleanAllRetainedPV(context.Background(), *veleroCfg.ClientToInstallVelero)
+				}
+				DeleteStorageClass(context.Background(), *veleroCfg.ClientToInstallVelero, KibishiiStorageClassName)
 			})
-			if VeleroCfg.InstallVelero {
-				err = VeleroUninstall(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)
+			if InstallVelero {
+				ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
+				defer ctxCancel()
+				err = VeleroUninstall(ctx, veleroCfg)
 				Expect(err).To(Succeed())
 			}
 		}
@@ -72,57 +118,98 @@ func BackupRestoreTest(useVolumeSnapshots bool) {
 
 	When("kibishii is the sample workload", func() {
 		It("should be successfully backed up and restored to the default BackupStorageLocation", func() {
+			if InstallVelero {
+				if useVolumeSnapshots {
+					//Install node agent also
+					veleroCfg.UseNodeAgent = useVolumeSnapshots
+					// DefaultVolumesToFsBackup should be mutually exclusive with useVolumeSnapshots in installation CLI,
+					// otherwise DefaultVolumesToFsBackup need to be set to false in backup CLI when taking volume snapshot
+					// Make sure DefaultVolumesToFsBackup was set to false in backup CLI
+					veleroCfg.DefaultVolumesToFsBackup = useVolumeSnapshots
+				} else {
+					veleroCfg.DefaultVolumesToFsBackup = !useVolumeSnapshots
+				}
+				Expect(VeleroInstall(context.Background(), &veleroCfg, false)).To(Succeed())
+			}
 			backupName = "backup-" + UUIDgen.String()
 			restoreName = "restore-" + UUIDgen.String()
-			// Even though we are using Velero's CloudProvider plugin for object storage, the kubernetes cluster is running on
+			// Even though we are using Velero's CloudProvider plugin for object storage, the Kubernetes cluster is running on
 			// KinD. So use the kind installation for Kibishii.
-			Expect(RunKibishiiTests(*VeleroCfg.ClientToInstallVelero, VeleroCfg, backupName, restoreName, "", kibishiiNamespace, useVolumeSnapshots)).To(Succeed(),
+
+			// if set ProvideSnapshotsVolumeParam to false here, make sure set it true in other tests of this case
+			veleroCfg.ProvideSnapshotsVolumeParam = provideSnapshotVolumesParmInBackup
+
+			// Set DefaultVolumesToFsBackup to false since DefaultVolumesToFsBackup was set to true during installation
+			Expect(RunKibishiiTests(
+				veleroCfg,
+				backupName,
+				restoreName,
+				"",
+				kibishiiNamespace,
+				useVolumeSnapshots,
+				false,
+			)).To(Succeed(),
 				"Failed to successfully backup and restore Kibishii namespace")
 		})
 
 		It("should successfully back up and restore to an additional BackupStorageLocation with unique credentials", func() {
-			if VeleroCfg.AdditionalBSLProvider == "" {
+			if backupRestoreTestConfig.isRetainPVTest {
+				Skip("It's tested by 1st test case")
+			}
+			if veleroCfg.AdditionalBSLProvider == "" {
 				Skip("no additional BSL provider given, not running multiple BackupStorageLocation with unique credentials tests")
 			}
 
-			if VeleroCfg.AdditionalBSLBucket == "" {
+			if veleroCfg.AdditionalBSLBucket == "" {
 				Skip("no additional BSL bucket given, not running multiple BackupStorageLocation with unique credentials tests")
 			}
 
-			if VeleroCfg.AdditionalBSLCredentials == "" {
+			if veleroCfg.AdditionalBSLCredentials == "" {
 				Skip("no additional BSL credentials given, not running multiple BackupStorageLocation with unique credentials tests")
 			}
+			if InstallVelero {
+				if useVolumeSnapshots {
+					veleroCfg.DefaultVolumesToFsBackup = !useVolumeSnapshots
+				} else { //FS volume backup
+					// Install VolumeSnapshots also
+					veleroCfg.UseVolumeSnapshots = !useVolumeSnapshots
+					// DefaultVolumesToFsBackup is false in installation CLI here,
+					// so must set DefaultVolumesToFsBackup to be true in backup CLI come after
+					veleroCfg.DefaultVolumesToFsBackup = useVolumeSnapshots
+				}
 
-			Expect(VeleroAddPluginsForProvider(context.TODO(), VeleroCfg.VeleroCLI,
-				VeleroCfg.VeleroNamespace, VeleroCfg.AdditionalBSLProvider,
-				VeleroCfg.AddBSLPlugins, VeleroCfg.Features)).To(Succeed())
+				Expect(VeleroInstall(context.Background(), &veleroCfg, false)).To(Succeed())
+			}
+			plugins, err := GetPlugins(context.TODO(), veleroCfg, false)
+			Expect(err).To(Succeed())
+			Expect(AddPlugins(plugins, veleroCfg)).To(Succeed())
 
 			// Create Secret for additional BSL
 			secretName := fmt.Sprintf("bsl-credentials-%s", UUIDgen)
-			secretKey := fmt.Sprintf("creds-%s", VeleroCfg.AdditionalBSLProvider)
+			secretKey := fmt.Sprintf("creds-%s", veleroCfg.AdditionalBSLProvider)
 			files := map[string]string{
-				secretKey: VeleroCfg.AdditionalBSLCredentials,
+				secretKey: veleroCfg.AdditionalBSLCredentials,
 			}
 
-			Expect(CreateSecretFromFiles(context.TODO(), *VeleroCfg.ClientToInstallVelero, VeleroCfg.VeleroNamespace, secretName, files)).To(Succeed())
+			Expect(CreateSecretFromFiles(context.TODO(), *veleroCfg.ClientToInstallVelero, veleroCfg.VeleroNamespace, secretName, files)).To(Succeed())
 
 			// Create additional BSL using credential
-			additionalBsl := fmt.Sprintf("bsl-%s", UUIDgen)
+			additionalBsl := "add-bsl"
 			Expect(VeleroCreateBackupLocation(context.TODO(),
-				VeleroCfg.VeleroCLI,
-				VeleroCfg.VeleroNamespace,
+				veleroCfg.VeleroCLI,
+				veleroCfg.VeleroNamespace,
 				additionalBsl,
-				VeleroCfg.AdditionalBSLProvider,
-				VeleroCfg.AdditionalBSLBucket,
-				VeleroCfg.AdditionalBSLPrefix,
-				VeleroCfg.AdditionalBSLConfig,
+				veleroCfg.AdditionalBSLProvider,
+				veleroCfg.AdditionalBSLBucket,
+				veleroCfg.AdditionalBSLPrefix,
+				veleroCfg.AdditionalBSLConfig,
 				secretName,
 				secretKey,
 			)).To(Succeed())
 
-			bsls := []string{"default", additionalBsl}
+			BSLs := []string{"default", additionalBsl}
 
-			for _, bsl := range bsls {
+			for _, bsl := range BSLs {
 				backupName = fmt.Sprintf("backup-%s", bsl)
 				restoreName = fmt.Sprintf("restore-%s", bsl)
 				// We limit the length of backup name here to avoid the issue of vsphere plugin https://github.com/vmware-tanzu/velero-plugin-for-vsphere/issues/370
@@ -131,7 +218,19 @@ func BackupRestoreTest(useVolumeSnapshots bool) {
 					backupName = fmt.Sprintf("%s-%s", backupName, UUIDgen)
 					restoreName = fmt.Sprintf("%s-%s", restoreName, UUIDgen)
 				}
-				Expect(RunKibishiiTests(*VeleroCfg.ClientToInstallVelero, VeleroCfg, backupName, restoreName, bsl, kibishiiNamespace, useVolumeSnapshots)).To(Succeed(),
+				veleroCfg.ProvideSnapshotsVolumeParam = !provideSnapshotVolumesParmInBackup
+				workloadNS := kibishiiNamespace + bsl
+				Expect(
+					RunKibishiiTests(
+						veleroCfg,
+						backupName,
+						restoreName,
+						bsl,
+						workloadNS,
+						useVolumeSnapshots,
+						!useVolumeSnapshots,
+					),
+				).To(Succeed(),
 					"Failed to successfully backup and restore Kibishii namespace using BSL %s", bsl)
 			}
 		})

@@ -20,14 +20,12 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/client-go/kubernetes/scheme"
-
+	testclocks "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -56,7 +54,7 @@ var _ = Describe("Server Status Request Reconciler", func() {
 	// `now` will be used to set the fake clock's time; capture
 	// it here so it can be referenced in the test case defs.
 	now, err := time.Parse(time.RFC1123, time.RFC1123)
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 	now = now.Local()
 
 	DescribeTable("a Server Status request",
@@ -64,10 +62,10 @@ var _ = Describe("Server Status Request Reconciler", func() {
 			// Setup reconciler
 			Expect(velerov1api.AddToScheme(scheme.Scheme)).To(Succeed())
 			r := NewServerStatusRequestReconciler(
-				fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(test.req).Build(),
 				context.Background(),
+				fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(test.req).Build(),
 				test.reqPluginLister,
-				clock.NewFakeClock(now),
+				testclocks.NewFakeClock(now),
 				velerotest.NewLogger(),
 			)
 
@@ -80,7 +78,7 @@ var _ = Describe("Server Status Request Reconciler", func() {
 
 			Expect(actualResult).To(BeEquivalentTo(test.expectedRequeue))
 			if test.expectedErrMsg == "" {
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			} else {
 				Expect(err.Error()).To(BeEquivalentTo(test.expectedErrMsg))
 				return
@@ -93,7 +91,7 @@ var _ = Describe("Server Status Request Reconciler", func() {
 			if test.expected == nil {
 				Expect(apierrors.IsNotFound(err)).To(BeTrue())
 			} else {
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Eventually(instance.Status.Phase == test.expected.Status.Phase, timeout).Should(BeTrue())
 			}
 		},
