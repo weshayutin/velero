@@ -22,7 +22,10 @@ import (
 	"strings"
 	"time"
 
+	"path/filepath"
+
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
+	v1core "k8s.io/api/core/v1"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -99,6 +102,10 @@ type CreateOptions struct {
 	FromSchedule             string
 	OrderedResources         string
 	CSISnapshotTimeout       time.Duration
+
+	// ResolvedNamespaces is the list of namespaces to include in the backup,
+	// after wildcard expansion.
+	ResolvedNamespaces []string
 
 	client veleroclient.Interface
 }
@@ -201,6 +208,48 @@ func (o *CreateOptions) Complete(args []string, f client.Factory) error {
 }
 
 func (o *CreateOptions) Run(c *cobra.Command, f client.Factory) error {
+	// Wildcard namespace resolution
+	if o.FromSchedule == "" { // Logic corrected: only resolve if not from schedule
+		kbClient, err := f.KubebuilderClient() // Use KubebuilderClient
+		if err != nil {
+			return fmt.Errorf("error getting Kubebuilder client: %w", err)
+		}
+
+		var allNamespacesList v1core.NamespaceList
+		if err := kbClient.List(context.Background(), &allNamespacesList); err != nil { // Use kbClient.List
+			return fmt.Errorf("error listing namespaces: %w", err)
+		}
+
+		allNamespaces := make([]string, 0, len(allNamespacesList.Items))
+		for _, ns := range allNamespacesList.Items {
+			allNamespaces = append(allNamespaces, ns.Name)
+		}
+
+		o.ResolvedNamespaces = make([]string, 0)
+		resolvedSet := make(map[string]struct{}) // To avoid duplicates
+
+		for _, pattern := range o.IncludeNamespaces {
+			if strings.Contains(pattern, "*") {
+				for _, nsName := range allNamespaces {
+					matched, _ := filepath.Match(pattern, nsName) // Error from filepath.Match is ignored for simplicity
+					if matched {
+						if _, exists := resolvedSet[nsName]; !exists {
+							o.ResolvedNamespaces = append(o.ResolvedNamespaces, nsName)
+							resolvedSet[nsName] = struct{}{}
+						}
+					}
+				}
+			} else {
+				// Add non-wildcarded namespaces directly, duplicates handled by set.
+				// Server-side validation will ultimately determine if they exist.
+				if _, exists := resolvedSet[pattern]; !exists {
+					o.ResolvedNamespaces = append(o.ResolvedNamespaces, pattern)
+					resolvedSet[pattern] = struct{}{}
+				}
+			}
+		}
+	}
+
 	backup, err := o.BuildBackup(f.Namespace())
 	if err != nil {
 		return err
@@ -326,8 +375,19 @@ func (o *CreateOptions) BuildBackup(namespace string) (*velerov1api.Backup, erro
 		backupBuilder = builder.ForBackup(namespace, o.Name).
 			FromSchedule(schedule)
 	} else {
+		// Use ResolvedNamespaces if not from schedule, otherwise use original IncludeNamespaces
+		// (which would typically come from schedule template if FromSchedule was true,
+		// but this path is for when FromSchedule is false).
+		includedNamespaces := o.IncludeNamespaces
+		if o.FromSchedule == "" && o.ResolvedNamespaces != nil {
+			// If ResolvedNamespaces is empty (e.g. '*' matched no namespaces),
+			// it will correctly result in an empty IncludedNamespaces list for the backup spec,
+			// which Velero interprets as "all namespaces".
+			includedNamespaces = o.ResolvedNamespaces
+		}
+
 		backupBuilder = builder.ForBackup(namespace, o.Name).
-			IncludedNamespaces(o.IncludeNamespaces...).
+			IncludedNamespaces(includedNamespaces...).
 			ExcludedNamespaces(o.ExcludeNamespaces...).
 			IncludedResources(o.IncludeResources...).
 			ExcludedResources(o.ExcludeResources...).
