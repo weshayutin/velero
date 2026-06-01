@@ -469,6 +469,20 @@ func (r *itemCollector) getResourceItems(
 		namespacesToList = []string{""}
 	}
 
+	// When backing up all namespaces with a label selector, use a single
+	// cluster-wide LIST per resource type instead of one LIST per namespace.
+	// The label selector is applied server-side, and each returned item
+	// carries its namespace in metadata. This reduces API calls from
+	// (resourceTypes × namespaces) to just resourceTypes.
+	if !clusterScoped &&
+		r.backupRequest.NamespaceIncludesExcludes != nil &&
+		r.backupRequest.NamespaceIncludesExcludes.IncludeEverything() &&
+		(r.backupRequest.Spec.LabelSelector != nil ||
+			len(r.backupRequest.Spec.OrLabelSelectors) > 0) {
+		log.Info("Using cluster-wide LIST with server-side label filtering for all-namespace backup")
+		namespacesToList = []string{""}
+	}
+
 	var items []*kubernetesResource
 
 	for _, namespace := range namespacesToList {

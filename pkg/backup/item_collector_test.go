@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
@@ -303,5 +304,201 @@ func TestItemCollectorBackupNamespaces(t *testing.T) {
 				require.True(t, r.nsTracker.isTracked(ns))
 			}
 		})
+	}
+}
+
+// fakeResourceIE implements collections.IncludesExcludesInterface
+// for test purposes.
+type fakeResourceIE struct {
+	shouldInclude bool
+}
+
+func (f *fakeResourceIE) ShouldInclude(_ string) bool { return f.shouldInclude }
+func (f *fakeResourceIE) ShouldExclude(_ string) bool { return !f.shouldInclude }
+
+func TestClusterWideLISTOptimization(t *testing.T) {
+	tests := []struct {
+		name string
+		// backup spec
+		labelSelector    *metav1.LabelSelector
+		orLabelSelectors []*metav1.LabelSelector
+		// namespace IE setup
+		nsIncludes []string
+		nsExcludes []string
+		// items returned by the cluster-wide list
+		returnedItems []unstructured.Unstructured
+		// whether we expect a single cluster-wide call (namespace="")
+		// vs per-namespace calls
+		expectClusterWideLIST bool
+		// expected number of ClientForGroupVersionResource calls
+		expectedClientCalls int
+	}{
+		{
+			name: "labelSelector with all namespaces uses cluster-wide LIST",
+			labelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"backup": "true"},
+			},
+			nsIncludes: []string{"*"},
+			returnedItems: []unstructured.Unstructured{
+				*newUnstructuredWithNamespace("v1", "ConfigMap", "ns1", "cm1"),
+				*newUnstructuredWithNamespace("v1", "ConfigMap", "ns2", "cm2"),
+			},
+			expectClusterWideLIST: true,
+			expectedClientCalls:   1,
+		},
+		{
+			name: "orLabelSelectors with all namespaces uses cluster-wide LIST",
+			orLabelSelectors: []*metav1.LabelSelector{
+				{MatchLabels: map[string]string{"backup": "true"}},
+			},
+			nsIncludes: []string{"*"},
+			returnedItems: []unstructured.Unstructured{
+				*newUnstructuredWithNamespace("v1", "ConfigMap", "ns1", "cm1"),
+			},
+			expectClusterWideLIST: true,
+			expectedClientCalls:   1,
+		},
+		{
+			name: "labelSelector with specific namespaces does NOT use cluster-wide LIST",
+			labelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"backup": "true"},
+			},
+			nsIncludes:            []string{"ns1", "ns2"},
+			expectClusterWideLIST: false,
+			expectedClientCalls:   2,
+		},
+		{
+			name: "labelSelector with excluded namespace does NOT use cluster-wide LIST",
+			labelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"backup": "true"},
+			},
+			nsIncludes:            []string{"*"},
+			nsExcludes:            []string{"kube-system"},
+			expectClusterWideLIST: false,
+			expectedClientCalls:   0, // not checked, just needs >1
+		},
+		{
+			name:                  "no labelSelector does NOT use cluster-wide LIST",
+			nsIncludes:            []string{"*"},
+			expectClusterWideLIST: false,
+			expectedClientCalls:   0, // not checked
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+
+			// Build the backup
+			backupBuilder := builder.ForBackup("velero", "backup")
+			if tc.labelSelector != nil {
+				backupBuilder.LabelSelector(tc.labelSelector)
+			}
+			if tc.orLabelSelectors != nil {
+				backupBuilder.OrLabelSelector(tc.orLabelSelectors)
+			}
+			backup := backupBuilder.Result()
+
+			// Build namespace IE
+			ie := collections.NewNamespaceIncludesExcludes()
+			if len(tc.nsIncludes) > 0 {
+				ie.Includes(tc.nsIncludes...)
+			}
+			if len(tc.nsExcludes) > 0 {
+				ie.Excludes(tc.nsExcludes...)
+			}
+
+			// Set up dynamic client mock that returns items
+			returnList := &unstructured.UnstructuredList{Items: tc.returnedItems}
+
+			dc := &test.FakeDynamicClient{}
+			dc.On("List", mock.Anything).Return(returnList, nil)
+
+			factory := &test.FakeDynamicFactory{}
+			factory.On(
+				"ClientForGroupVersionResource",
+				mock.Anything,
+				mock.Anything,
+				mock.Anything,
+			).Return(dc, nil)
+
+			discoveryHelper := &test.FakeDiscoveryHelper{
+				AutoReturnResource: true,
+			}
+
+			r := itemCollector{
+				log: logrus.StandardLogger(),
+				backupRequest: &Request{
+					Backup:                    backup,
+					NamespaceIncludesExcludes: ie,
+					ResourceIncludesExcludes:  &fakeResourceIE{shouldInclude: true},
+				},
+				discoveryHelper: discoveryHelper,
+				dynamicFactory:  factory,
+				dir:             tempDir,
+			}
+
+			gv := schema.GroupVersion{Group: "", Version: "v1"}
+			resource := metav1.APIResource{
+				Name:       "configmaps",
+				Kind:       "ConfigMap",
+				Namespaced: true,
+			}
+
+			items, err := r.getResourceItems(
+				logrus.StandardLogger(), gv, resource, nil,
+			)
+			require.NoError(t, err)
+
+			if tc.expectClusterWideLIST {
+				// Verify ClientForGroupVersionResource was called with namespace=""
+				var clusterWideCallFound bool
+				for _, call := range factory.Calls {
+					if call.Method == "ClientForGroupVersionResource" {
+						ns := call.Arguments.Get(2).(string)
+						if ns == "" {
+							clusterWideCallFound = true
+						}
+					}
+				}
+				assert.True(t, clusterWideCallFound,
+					"expected cluster-wide LIST (namespace='') but it was not called")
+
+				// Verify correct number of items returned
+				assert.Len(t, items, len(tc.returnedItems))
+
+				// Verify nsTracker picked up namespaces from returned items
+				for _, item := range tc.returnedItems {
+					if item.GetNamespace() != "" {
+						assert.True(t, r.nsTracker.isTracked(item.GetNamespace()),
+							"expected namespace %s to be tracked", item.GetNamespace())
+					}
+				}
+			}
+
+			if !tc.expectClusterWideLIST && tc.expectedClientCalls > 0 {
+				// Verify we did NOT get a cluster-wide call
+				for _, call := range factory.Calls {
+					if call.Method == "ClientForGroupVersionResource" {
+						ns := call.Arguments.Get(2).(string)
+						assert.NotEmpty(t, ns,
+							"expected per-namespace LIST but got cluster-wide call")
+					}
+				}
+			}
+		})
+	}
+}
+
+func newUnstructuredWithNamespace(apiVersion, kind, namespace, name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": apiVersion,
+			"kind":       kind,
+			"metadata": map[string]interface{}{
+				"namespace": namespace,
+				"name":      name,
+			},
+		},
 	}
 }
